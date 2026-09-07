@@ -140,9 +140,9 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     net_profit_row = None
     for idx in df_pl.index:
         idx_lower = str(idx).lower()
-        if "eps" in idx_lower and not eps_row:
+        if any(k in idx_lower for k in ["eps", "earnings per share"]) and not eps_row:
             eps_row = idx
-        if "net profit" in idx_lower and not net_profit_row:
+        if any(k in idx_lower for k in ["net profit", "net loss"]) and not net_profit_row:
             net_profit_row = idx
 
     if not eps_row:
@@ -177,7 +177,6 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     df_hist = pd.DataFrame(records)
     valid_pes = [r["Historical Year-End P/E"] for r in records if isinstance(r["Historical Year-End P/E"], (int, float))]
     
-    # Filter out extreme outliers (> 100x P/E) caused by near-zero EPS for reliable medians
     filtered_pes = [p for p in valid_pes if isinstance(p, (int, float)) and 0 < p <= 100]
     
     if filtered_pes:
@@ -1062,7 +1061,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     else:
         add_item("Capital Efficiency", "3 Yr Sales CAGR", "N/A", 2, 5, "ℹ️ Info", "Sales CAGR data not reported")
 
-    # Fixed PAT CAGR Logic (Negative growth = Fail / Red Flag)
+    # Corrected PAT CAGR Logic
     if p_cagr is not None:
         if p_cagr >= 12:
             add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 5, 5, "🟢 Pass", "Strong profit expansion (> 12%)")
