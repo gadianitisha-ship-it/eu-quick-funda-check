@@ -74,8 +74,8 @@ def format_inr(val):
     return f"-{formatted}" if is_neg else formatted
 
 def format_financial_df(df):
-    if df.empty:
-        return df
+    if df is None or df.empty:
+        return pd.DataFrame()
     formatted_df = df.copy()
     for col in formatted_df.columns:
         formatted_df[col] = formatted_df[col].apply(lambda x: format_inr(x) if safe_float(x) is not None else x)
@@ -97,7 +97,7 @@ def compute_series_cagr(series, years):
 # ----------------- SECTOR ARCHETYPE RESOLVER -----------------
 def resolve_sector_archetype(sector_desc: str, company_name: str) -> str:
     text = f"{sector_desc} {company_name}".lower()
-    if any(k in text for k in ["bank", "nbfc", "housing finance", "financial services", "insurance", "microfinance"]):
+    if any(k in text for k in ["bank", "nbfc", "housing finance", "financial services", "insurance", "microfinance", "small finance"]):
         return "BFSI"
     elif any(k in text for k in ["it services", "software", "computers - software", "information technology", "data processing"]):
         return "IT"
@@ -133,7 +133,7 @@ def fetch_real_historical_prices(symbol: str):
     return price_map
 
 def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, curr_pe, face_val, symbol=""):
-    if df_pl.empty:
+    if df_pl is None or df_pl.empty:
         return pd.DataFrame(), {}
 
     eps_row = None
@@ -210,7 +210,7 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
 
 # ----------------- DUPONT 3-STAGE ENGINE -----------------
 def compute_dupont_analysis(df_pl, df_bs):
-    if df_pl.empty or df_bs.empty:
+    if df_pl is None or df_pl.empty or df_bs is None or df_bs.empty:
         return pd.DataFrame()
 
     def get_row(df, kw):
@@ -219,10 +219,10 @@ def compute_dupont_analysis(df_pl, df_bs):
                 return df.loc[idx]
         return None
 
-    sales_row = get_row(df_pl, "Sales")
+    sales_row = get_row(df_pl, "Sales") or get_row(df_pl, "Revenue") or get_row(df_pl, "Interest Earned")
     pat_row = get_row(df_pl, "Net Profit")
     assets_row = get_row(df_bs, "Total Assets")
-    eq_row = get_row(df_bs, "Equity Capital")
+    eq_row = get_row(df_bs, "Equity Capital") or get_row(df_bs, "Share Capital")
     res_row = get_row(df_bs, "Reserves")
 
     if sales_row is None or pat_row is None or assets_row is None or eq_row is None:
@@ -279,7 +279,7 @@ def evaluate_forensic_red_flags(d: dict):
         })
 
     def get_series(df, row_kw):
-        if df.empty:
+        if df is None or df.empty:
             return []
         for idx in df.index:
             if row_kw.lower() in str(idx).lower():
@@ -293,7 +293,7 @@ def evaluate_forensic_red_flags(d: dict):
 
     cfo_series = get_series(d["df_cf"], "Cash from Operating")
     pat_series = get_series(d["df_pl"], "Net Profit")
-    sales_series = get_series(d["df_pl"], "Sales")
+    sales_series = get_series(d["df_pl"], "Sales") or get_series(d["df_pl"], "Revenue")
     assets_series = get_series(d["df_bs"], "Total Assets")
     borrowings = get_series(d["df_bs"], "Borrowings")
 
@@ -435,22 +435,25 @@ def fetch_nse_delivery_data(ticker: str):
         pass
     return None
 
-# ----------------- CACHED FULL SCRAPER -----------------
+# ----------------- SCRAPER WITH AUTOMATIC REDIRECT & STANDALONE FALLBACK -----------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def scrape_full_screener(symbol: str):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
     
+    # Try consolidated first, but immediately fall back to standalone
     url = f"https://www.screener.in/company/{symbol}/consolidated/"
-    res = session.get(url, timeout=6.0)
-    if res.status_code != 200:
-        url = f"https://www.screener.in/company/{symbol}/"
-        res = session.get(url, timeout=6.0)
-        if res.status_code != 200:
-            return None
-            
+    res = session.get(url, timeout=6.0, allow_redirects=True)
     soup = BeautifulSoup(res.text, 'html.parser')
+    
+    # Test if financial tables exist on the page; if not, fetch standalone
+    test_table = soup.find('section', {'id': 'profit-loss'}) or soup.find('section', {'id': 'income-statement'})
+    if not test_table:
+        url = f"https://www.screener.in/company/{symbol}/"
+        res = session.get(url, timeout=6.0, allow_redirects=True)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
     data = {"Symbol": symbol}
     
     title_tag = soup.find('h1')
@@ -518,20 +521,26 @@ def scrape_full_screener(symbol: str):
     data["live_announcements"] = documents_list[:6]
     data["live_concalls"] = concall_list[:6]
 
-    # Quick Top Ratios
-    top_ratios = soup.find('ul', {'id': 'top-ratios'})
+    # Quick Top Ratios (Supports both ul#top-ratios and div.company-ratios)
+    top_ratios = soup.find('ul', {'id': 'top-ratios'}) or soup.find('div', class_='company-ratios')
     if top_ratios:
-        for li in top_ratios.find_all('li'):
+        for li in top_ratios.find_all(['li', 'div']):
             name_el = li.find('span', class_='name')
-            val_el = li.find('span', class_='nowrap value')
+            val_el = li.find('span', class_='nowrap value') or li.find('span', class_='value')
             if name_el and val_el:
                 name = name_el.text.strip()
                 val_clean = val_el.text.replace(',', '').replace('₹', '').strip()
                 parsed = safe_float(val_clean)
                 data[name] = parsed if parsed is not None else val_clean
 
-    def extract_full_table(section_id):
-        sec = soup.find('section', {'id': section_id})
+    def extract_full_table(section_ids):
+        if isinstance(section_ids, str):
+            section_ids = [section_ids]
+        sec = None
+        for s_id in section_ids:
+            sec = soup.find('section', {'id': s_id})
+            if sec:
+                break
         if not sec:
             return pd.DataFrame()
         table = sec.find('table')
@@ -560,15 +569,15 @@ def scrape_full_screener(symbol: str):
             df.index = df.index.map(lambda x: str(x).replace('+', '').strip())
         return df
 
-    data["df_pl"] = extract_full_table("profit-loss")
-    data["df_bs"] = extract_full_table("balance-sheet")
-    data["df_cf"] = extract_full_table("cash-flow")
-    data["df_quarters"] = extract_full_table("quarters")
-    data["df_ratios"] = extract_full_table("ratios")
-    data["df_shareholding"] = extract_full_table("shareholding")
+    data["df_pl"] = extract_full_table(["profit-loss", "income-statement"])
+    data["df_bs"] = extract_full_table(["balance-sheet"])
+    data["df_cf"] = extract_full_table(["cash-flow", "cash-flows"])
+    data["df_quarters"] = extract_full_table(["quarters", "quarterly-results"])
+    data["df_ratios"] = extract_full_table(["ratios"])
+    data["df_shareholding"] = extract_full_table(["shareholding"])
 
     def get_row_series_and_col(df, row_name):
-        if df.empty:
+        if df is None or df.empty:
             return None, None
         for idx in df.index:
             if row_name.lower() in str(idx).lower():
@@ -579,7 +588,7 @@ def scrape_full_screener(symbol: str):
         return None, None
 
     def get_row_series(df, row_name):
-        if df.empty:
+        if df is None or df.empty:
             return []
         for idx in df.index:
             if row_name.lower() in str(idx).lower():
@@ -591,7 +600,7 @@ def scrape_full_screener(symbol: str):
                 return vals
         return []
 
-    # 1. BFSI Asset Quality
+    # BFSI Asset Quality
     gnpa_val, gnpa_period = get_row_series_and_col(data["df_quarters"], "Gross NPA")
     if gnpa_val is None:
         gnpa_val, gnpa_period = get_row_series_and_col(data["df_pl"], "Gross NPA")
@@ -604,15 +613,15 @@ def scrape_full_screener(symbol: str):
     data["Net_NPA_Val"] = nnpa_val
     data["Net_NPA_Period"] = nnpa_period if nnpa_period else "Latest"
 
-    # 2. IT Employee Cost Intensity
-    sales_ser = get_row_series(data["df_pl"], "Sales")
+    # IT Employee Cost
+    sales_ser = get_row_series(data["df_pl"], "Sales") or get_row_series(data["df_pl"], "Revenue")
     emp_ser = get_row_series(data["df_pl"], "Employee Cost")
     if not emp_ser:
         emp_ser = get_row_series(data["df_pl"], "Expenses")
     if sales_ser and emp_ser and sales_ser[-1] > 0:
         data["Employee_Cost_Pct"] = round((emp_ser[-1] / sales_ser[-1]) * 100, 1)
 
-    # 3. PHARMA Sector Metrics (R&D %, Gross Margin, Debtor Days)
+    # Pharma Metrics
     mat_ser = get_row_series(data["df_pl"], "Material Cost") or get_row_series(data["df_pl"], "Raw Material")
     if sales_ser and mat_ser and sales_ser[-1] > 0:
         data["Gross_Margin_Pct"] = round(((sales_ser[-1] - mat_ser[-1]) / sales_ser[-1]) * 100, 1)
@@ -659,10 +668,10 @@ def scrape_full_screener(symbol: str):
     data["3Yr_PAT_CAGR"] = safe_float(data["Profit_CAGR"].get("3 Years"))
     data["3Yr_Avg_ROE"] = safe_float(data["ROE_History"].get("3 Years"))
 
-    op_series = get_row_series(data["df_pl"], "Operating Profit")
+    op_series = get_row_series(data["df_pl"], "Operating Profit") or get_row_series(data["df_pl"], "Financing Profit")
     eps_series = get_row_series(data["df_pl"], "EPS in Rs")
     cfo_series = get_row_series(data["df_cf"], "Cash from Operating")
-    eq_cap = get_row_series(data["df_bs"], "Equity Capital")
+    eq_cap = get_row_series(data["df_bs"], "Equity Capital") or get_row_series(data["df_bs"], "Share Capital")
     reserves = get_row_series(data["df_bs"], "Reserves")
     
     net_worth_series = []
@@ -803,7 +812,7 @@ def scrape_full_screener(symbol: str):
 
     return data
 
-# ----------------- SCORING ENGINE (ROBUST & AUDITED) -----------------
+# ----------------- ROBUST SCORING ENGINE -----------------
 def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     results = []
     archetype = m.get("Archetype", "GENERAL")
@@ -1091,7 +1100,6 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Sector-Specific (BFSI)", "Price to Book (P/B)", "1.5x", 4, 5, "🟢 Pass", "Standard valuation")
 
-        # ROA Calculation without out-of-bounds index errors
         roa = safe_float(m.get("ROA"), safe_float(m.get("Return on assets")))
         if roa is None:
             np_vals = get_series(m.get("df_pl"), "Net Profit")
@@ -1248,7 +1256,7 @@ if ticker_input:
         live_news = fetch_live_news(ticker_input)
         nse_delivery = fetch_nse_delivery_data(ticker_input)
         
-    if not d:
+    if not d or (d.get("df_pl", pd.DataFrame()).empty and d.get("df_quarters", pd.DataFrame()).empty):
         st.error(f"Unable to retrieve verified financials for '{ticker_input}'. Please check the symbol or verify on Screener.in.")
     else:
         final_score, checklist_df, cat_scores = evaluate_exact_checklist(d, pe_stats)
