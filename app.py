@@ -41,7 +41,6 @@ def safe_float(val, default=None):
     return default
 
 def format_inr(val):
-    """Formats integers and float values into the standard Indian numbering system (1,00,000)."""
     if val is None or val == "" or str(val).strip() in ["-", "None", "nan", "N/A"]:
         return "-"
     num = safe_float(val)
@@ -75,7 +74,6 @@ def format_inr(val):
     return f"-{formatted}" if is_neg else formatted
 
 def format_financial_df(df):
-    """Applies Indian numeric formatting across an entire financial statement DataFrame."""
     if df.empty:
         return df
     formatted_df = df.copy()
@@ -99,7 +97,6 @@ def compute_series_cagr(series, years):
 # ----------------- REAL HISTORICAL PRICE & P/E ENGINE -----------------
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_real_historical_prices(symbol: str):
-    """Fetches real end-of-March closing prices from NSE/BSE via Yahoo Finance."""
     price_map = {}
     if not symbol:
         return price_map
@@ -143,7 +140,6 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     cols = [c for c in df_pl.columns if c.lower() != 'ttm']
     records = []
     
-    # Query verified closing prices
     real_prices = fetch_real_historical_prices(symbol)
 
     for idx_yr, c in enumerate(cols):
@@ -156,7 +152,6 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
             hist_price = real_price
             hist_pe = round(hist_price / eps_val, 1) if (eps_val and eps_val > 0) else None
         else:
-            # For the current active year if March is not yet closed
             hist_price = cmp_val if idx_yr == len(cols) - 1 else None
             hist_pe = round(hist_price / eps_val, 1) if (hist_price and eps_val and eps_val > 0) else None
 
@@ -178,7 +173,6 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
         mean_pe = round(float(np.mean(valid_pes)), 1)
         std_pe = round(float(np.std(valid_pes)), 1)
         
-        # Use verified live market P/E from Screener directly
         live_pe_val = safe_float(curr_pe, valid_pes[-1])
         diff_5y = round(((live_pe_val - med_5) / med_5) * 100, 1) if med_5 > 0 else 0.0
         
@@ -561,7 +555,6 @@ def scrape_full_screener(symbol: str):
     data["df_cf"] = extract_full_table("cash-flow")
     data["df_shareholding"] = extract_full_table("shareholding")
 
-    # Fetch granular sub-ledger schedules
     data["schedules"] = {}
     if company_id:
         try:
@@ -589,7 +582,6 @@ def scrape_full_screener(symbol: str):
         except Exception:
             pass
 
-    # Built-in fallback breakdown if API is throttled
     if not data["schedules"] and not data["df_pl"].empty:
         years = [c for c in data["df_pl"].columns]
         exp_row = None
@@ -1106,13 +1098,10 @@ if os.path.exists(LOGO_FILE):
 else:
     st.title("🏛️ EU QUICK FUNDA CHECK")
 
-st.caption("Institutional fundamental diagnostic terminal with audited historical multiples, DuPont decomposition, forensic detection, and real-time reconciliation.")
-
 sidebar = st.sidebar
 if os.path.exists(LOGO_FILE):
     sidebar.image(LOGO_FILE, width=120)
 sidebar.title("EU QUICK FUNDA CHECK")
-sidebar.caption("Institutional Fundamental Terminal")
 sidebar.divider()
 
 with sidebar.form("audit_form"):
@@ -1251,7 +1240,6 @@ if ticker_input:
         # TAB 2: COMPOUNDED GROWTH
         with tab_cagr:
             st.markdown("### 📊 Comprehensive 8-Metric Compounded Matrix")
-            st.caption("Native and computed compounded growth rates across financial timeframes.")
             st.dataframe(extended_matrix_df, hide_index=True, use_container_width=True)
 
             st.divider()
@@ -1273,7 +1261,6 @@ if ticker_input:
         # TAB 3: FINANCIAL STATEMENTS WITH DRILL-DOWN SUB-LEDGER EXPLORER
         with tab_financials:
             st.markdown("### 📑 Primary Financial Statements (₹ Cr)")
-            st.caption("All figures formatted with Indian numbering notation (1,00,000). Use the interactive dropdown selectors below to inspect granular schedules.")
 
             # 1. P&L Section
             if not d["df_pl"].empty:
@@ -1313,7 +1300,6 @@ if ticker_input:
         # TAB 4: DUPONT 3-STAGE
         with tab_dupont:
             st.markdown("### 🔬 DuPont 3-Stage Decomposition")
-            st.caption("Deconstructs Return on Equity into Profit Margin, Asset Turnover, and Financial Leverage.")
 
             if not df_dupont.empty:
                 dp_latest = df_dupont.iloc[-1]
@@ -1331,7 +1317,6 @@ if ticker_input:
         # TAB 5: HISTORICAL P/E BANDS
         with tab_pe_bands:
             st.markdown("### 📊 Historical P/E Valuation Analysis & Multiple Trajectory")
-            st.caption("Chronological comparison of verified year-end closing P/E multiples against 3Y, 5Y, and 10Y medians.")
 
             if pe_stats:
                 b1, b2, b3, b4 = st.columns(4)
@@ -1361,7 +1346,6 @@ if ticker_input:
         # TAB 6: FORENSIC RED FLAGS
         with tab_forensics:
             st.markdown("### 🚩 Forensic Accounting & Earnings Quality Screen")
-            st.caption("Automates institutional forensic checks (accruals, cash realization, and promoter leverage).")
 
             fc1, fc2, fc3 = st.columns(3)
             fc1.metric("Critical Red Flags", f"{red_flags_cnt}", delta="Clean" if red_flags_cnt == 0 else "High Risk", delta_color="inverse")
@@ -1397,7 +1381,6 @@ if ticker_input:
         # TAB 8: DATA INTEGRITY AUDIT
         with tab_audit:
             st.markdown("### 🛡️ Automated Data Reconciliation & Integrity Audit")
-            st.caption("Verifies mathematical coherence across statements to ensure numbers are extracted and calculated accurately.")
 
             if d.get("audit_checks"):
                 df_audit = pd.DataFrame(d["audit_checks"])
@@ -1431,7 +1414,6 @@ if ticker_input:
                     st.write(f"• Delivery Quantity: `{format_inr(nse_delivery.get('delivery_qty'))}` shares")
                     st.write(f"• Total Traded Volume: `{format_inr(nse_delivery.get('traded_qty'))}` shares")
                 else:
-                    st.caption("NSE direct delivery snapshot requires active market session or browser verification.")
                     st.link_button("📊 Check Live NSE Delivery on Official Page", f"https://www.nseindia.com/get-quotes/equity?symbol={ticker_input}")
 
             with ev_col2:
