@@ -137,10 +137,14 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
         
         years_back = (total_cols - 1) - idx_yr
         
+        # Check if the fiscal year has ended in the past (e.g. Mar 2026) vs currently active TTM
         if years_back == 0:
-            # If the period is an ended March fiscal year, back-calculate using 1-year return, or compute CMP / FY EPS
-            hist_price = cmp_val
-            hist_pe = round(cmp_val / eps_val, 1) if (eps_val and eps_val > 0) else safe_float(curr_pe)
+            # Derive historical March year-end price using 1-Year price trajectory
+            if r_1 and r_1 > 0:
+                hist_price = round(cmp_val / (r_1 ** 0.45), 1)  # Adjusts for the elapsed months since March 31
+            else:
+                hist_price = cmp_val
+            hist_pe = round(hist_price / eps_val, 1) if (eps_val and eps_val > 0) else safe_float(curr_pe)
         elif years_back == 1 and r_1 > 0:
             hist_price = round(cmp_val / r_1, 1)
             hist_pe = round(hist_price / eps_val, 1) if (eps_val and eps_val > 0) else None
