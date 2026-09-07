@@ -177,14 +177,17 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     df_hist = pd.DataFrame(records)
     valid_pes = [r["Historical Year-End P/E"] for r in records if isinstance(r["Historical Year-End P/E"], (int, float))]
     
-    if valid_pes:
-        med_3 = round(float(np.median(valid_pes[-3:])), 1) if len(valid_pes) >= 3 else round(float(np.median(valid_pes)), 1)
-        med_5 = round(float(np.median(valid_pes[-5:])), 1) if len(valid_pes) >= 5 else round(float(np.median(valid_pes)), 1)
-        med_10 = round(float(np.median(valid_pes)), 1)
-        mean_pe = round(float(np.mean(valid_pes)), 1)
-        std_pe = round(float(np.std(valid_pes)), 1)
+    # Filter out extreme outliers (> 100x P/E) caused by near-zero EPS for reliable medians
+    filtered_pes = [p for p in valid_pes if isinstance(p, (int, float)) and 0 < p <= 100]
+    
+    if filtered_pes:
+        med_3 = round(float(np.median(filtered_pes[-3:])), 1) if len(filtered_pes) >= 3 else round(float(np.median(filtered_pes)), 1)
+        med_5 = round(float(np.median(filtered_pes[-5:])), 1) if len(filtered_pes) >= 5 else round(float(np.median(filtered_pes)), 1)
+        med_10 = round(float(np.median(filtered_pes)), 1)
+        mean_pe = round(float(np.mean(filtered_pes)), 1)
+        std_pe = round(float(np.std(filtered_pes)), 1)
         
-        live_pe_val = safe_float(curr_pe, valid_pes[-1])
+        live_pe_val = safe_float(curr_pe, valid_pes[-1] if valid_pes else 15.0)
         diff_5y = round(((live_pe_val - med_5) / med_5) * 100, 1) if med_5 > 0 else 0.0
         
         if diff_5y > 20:
@@ -1059,11 +1062,14 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     else:
         add_item("Capital Efficiency", "3 Yr Sales CAGR", "N/A", 2, 5, "ℹ️ Info", "Sales CAGR data not reported")
 
+    # Fixed PAT CAGR Logic (Negative growth = Fail / Red Flag)
     if p_cagr is not None:
         if p_cagr >= 12:
             add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 5, 5, "🟢 Pass", "Strong profit expansion (> 12%)")
-        else:
+        elif p_cagr >= 0:
             add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 2, 5, "🟡 Moderate", "Sub-12% PAT growth")
+        else:
+            add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 0, 5, "🔴 Fail", "Negative profit growth / earnings contraction")
     else:
         add_item("Capital Efficiency", "3 Yrs PAT CAGR", "N/A", 2, 5, "ℹ️ Info", "PAT CAGR data not reported")
 
@@ -1265,7 +1271,7 @@ if ticker_input:
         live_news = fetch_live_news(ticker_input)
         nse_delivery = fetch_nse_delivery_data(ticker_input)
         
-    if not d or (d.get("df_pl", pd.DataFrame()).empty and d.get("df_quarters", pd.DataFrame()).empty):
+    if not d:
         st.error(f"Unable to retrieve verified financials for '{ticker_input}'. Please check the symbol or verify on Screener.in.")
     else:
         final_score, checklist_df, cat_scores = evaluate_exact_checklist(d, pe_stats)
