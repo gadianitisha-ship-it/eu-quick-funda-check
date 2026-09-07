@@ -548,54 +548,13 @@ def scrape_full_screener(symbol: str):
         if df.shape[1] == len(headers):
             df.columns = headers
             df = df.set_index(df.columns[0])
+            df.index = df.index.map(lambda x: str(x).replace('+', '').strip())
         return df
 
     data["df_pl"] = extract_full_table("profit-loss")
     data["df_bs"] = extract_full_table("balance-sheet")
     data["df_cf"] = extract_full_table("cash-flow")
     data["df_shareholding"] = extract_full_table("shareholding")
-
-    data["schedules"] = {}
-    if company_id:
-        try:
-            sched_url = f"https://www.screener.in/api/company/{company_id}/schedules/"
-            s_res = session.get(sched_url, timeout=4.5)
-            if s_res.status_code == 200 and len(s_res.text) > 100:
-                sched_soup = BeautifulSoup(s_res.text, 'html.parser')
-                for table in sched_soup.find_all('table'):
-                    th_title = table.find('th')
-                    if th_title:
-                        raw_title = th_title.text.strip()
-                        clean_title = re.sub(r'^[+\-\s]+', '', raw_title)
-                        s_headers = [h.text.strip() for h in table.find_all('th')[1:] if h.text.strip()]
-                        s_rows = []
-                        for tr in table.find_all('tr')[1:]:
-                            tds = tr.find_all(['td', 'th'])
-                            if tds:
-                                s_rows.append([c.text.strip().replace(',', '') for c in tds])
-                        if s_rows:
-                            df_sched = pd.DataFrame(s_rows)
-                            if df_sched.shape[1] == len(s_headers) + 1:
-                                df_sched.columns = ["Line Item"] + s_headers
-                                df_sched = df_sched.set_index("Line Item")
-                                data["schedules"][clean_title] = df_sched
-        except Exception:
-            pass
-
-    if not data["schedules"] and not data["df_pl"].empty:
-        years = [c for c in data["df_pl"].columns]
-        exp_row = None
-        for idx in data["df_pl"].index:
-            if "expenses" in str(idx).lower():
-                exp_row = idx
-                break
-        if exp_row:
-            tot_exp = [safe_float(data["df_pl"].loc[exp_row, y], 0) for y in years]
-            data["schedules"]["Expenses (Estimated Granular Split)"] = pd.DataFrame({
-                "Employee Benefit Expenses (~55%)": [round(x * 0.55, 0) for x in tot_exp],
-                "Operating & Other Expenses (~30%)": [round(x * 0.30, 0) for x in tot_exp],
-                "Cost of Materials & Equipment (~15%)": [round(x * 0.15, 0) for x in tot_exp]
-            }, index=years).T
 
     def get_row_series(df, row_name):
         if df.empty:
@@ -1083,9 +1042,6 @@ def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_tab
             d["df_peers"].to_excel(writer, sheet_name='Peers Comparison', index=False)
         if d.get("audit_checks"):
             pd.DataFrame(d["audit_checks"]).to_excel(writer, sheet_name='Integrity Audit', index=False)
-        for title, s_df in d.get("schedules", {}).items():
-            sheet_title = re.sub(r'[\\/*?:\[\]]', '_', title)[:30]
-            s_df.to_excel(writer, sheet_name=sheet_title)
     return output.getvalue()
 
 # ----------------- UI APPLICATION -----------------
@@ -1258,7 +1214,7 @@ if ticker_input:
                 st.markdown("##### 🏛️ Net Worth / Equity CAGR")
                 st.dataframe(pd.DataFrame(list(d["NetWorth_CAGR"].items()), columns=["Period", "Net Worth"]), hide_index=True, use_container_width=True)
 
-        # TAB 3: FINANCIAL STATEMENTS WITH DRILL-DOWN SUB-LEDGER EXPLORER
+        # TAB 3: FINANCIAL STATEMENTS
         with tab_financials:
             st.markdown("### 📑 Primary Financial Statements (₹ Cr)")
 
@@ -1266,16 +1222,6 @@ if ticker_input:
             if not d["df_pl"].empty:
                 st.markdown("#### 1. Profit & Loss Statement (₹ Cr)")
                 st.dataframe(format_financial_df(d["df_pl"]), use_container_width=True)
-
-                pl_schedules = d.get("schedules", {})
-                if pl_schedules:
-                    selected_pl_sub = st.selectbox(
-                        "🔍 Select Detailed Sub-Ledger to Inspect (P&L):",
-                        options=list(pl_schedules.keys()),
-                        key="pl_sub_selector"
-                    )
-                    if selected_pl_sub:
-                        st.dataframe(format_financial_df(pl_schedules[selected_pl_sub]), use_container_width=True)
             else:
                 st.info("Profit & Loss statement unavailable.")
 
