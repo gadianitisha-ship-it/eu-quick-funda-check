@@ -94,6 +94,15 @@ def compute_series_cagr(series, years):
     except Exception:
         return "N/A", start_val, end_val
 
+# ----------------- SECTOR ARCHETYPE RESOLVER -----------------
+def resolve_sector_archetype(sector_desc: str, company_name: str) -> str:
+    text = f"{sector_desc} {company_name}".lower()
+    if any(k in text for k in ["bank", "nbfc", "housing finance", "financial services", "insurance", "microfinance"]):
+        return "BFSI"
+    elif any(k in text for k in ["it services", "software", "computers - software", "information technology", "data processing"]):
+        return "IT"
+    return "GENERAL"
+
 # ----------------- REAL HISTORICAL PRICE & P/E ENGINE -----------------
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_real_historical_prices(symbol: str):
@@ -256,6 +265,7 @@ def compute_dupont_analysis(df_pl, df_bs):
 # ----------------- FORENSIC RED FLAG DETECTOR -----------------
 def evaluate_forensic_red_flags(d: dict):
     flags = []
+    archetype = d.get("Archetype", "GENERAL")
 
     def add_flag(check_name, status, severity, current_reading, interpretation):
         flags.append({
@@ -285,57 +295,56 @@ def evaluate_forensic_red_flags(d: dict):
     assets_series = get_series(d["df_bs"], "Total Assets")
     borrowings = get_series(d["df_bs"], "Borrowings")
 
-    if len(cfo_series) >= 3 and len(pat_series) >= 3:
-        sum_cfo = sum(cfo_series[-3:])
-        sum_pat = sum(pat_series[-3:])
-        if sum_pat > 0:
-            cfo_pat_ratio = round((sum_cfo / sum_pat) * 100, 1)
-            if cfo_pat_ratio < 60.0:
-                add_flag("Cumulative 3Y CFO vs PAT Conversion", "🚩 RED FLAG", "High",
-                         f"3Y CFO: ₹{format_inr(sum_cfo)} Cr vs 3Y PAT: ₹{format_inr(sum_pat)} Cr ({cfo_pat_ratio}%)",
-                         "Profits are not translating into operational cash flows. High risk of aggressive accrual accounting.")
-            elif cfo_pat_ratio < 80.0:
-                add_flag("Cumulative 3Y CFO vs PAT Conversion", "⚠️ WARNING", "Medium",
-                         f"3Y CFO: ₹{format_inr(sum_cfo)} Cr vs 3Y PAT: ₹{format_inr(sum_pat)} Cr ({cfo_pat_ratio}%)",
-                         "Moderate conversion gap. Operating cash flows trail reported earnings.")
+    # BFSI: Skip accruals and operating cash conversions (loans disbursed count as cash outflows)
+    if archetype != "BFSI":
+        if len(cfo_series) >= 3 and len(pat_series) >= 3:
+            sum_cfo = sum(cfo_series[-3:])
+            sum_pat = sum(pat_series[-3:])
+            if sum_pat > 0:
+                cfo_pat_ratio = round((sum_cfo / sum_pat) * 100, 1)
+                if cfo_pat_ratio < 60.0:
+                    add_flag("Cumulative 3Y CFO vs PAT Conversion", "🚩 RED FLAG", "High",
+                             f"3Y CFO: ₹{format_inr(sum_cfo)} Cr vs 3Y PAT: ₹{format_inr(sum_pat)} Cr ({cfo_pat_ratio}%)",
+                             "Profits are not translating into operational cash flows. High risk of aggressive accrual accounting.")
+                elif cfo_pat_ratio < 80.0:
+                    add_flag("Cumulative 3Y CFO vs PAT Conversion", "⚠️ WARNING", "Medium",
+                             f"3Y CFO: ₹{format_inr(sum_cfo)} Cr vs 3Y PAT: ₹{format_inr(sum_pat)} Cr ({cfo_pat_ratio}%)",
+                             "Moderate conversion gap. Operating cash flows trail reported earnings.")
+                else:
+                    add_flag("Cumulative 3Y CFO vs PAT Conversion", "✅ CLEAR", "Low",
+                             f"3Y CFO: ₹{format_inr(sum_cfo)} Cr vs 3Y PAT: ₹{format_inr(sum_pat)} Cr ({cfo_pat_ratio}%)",
+                             "High-quality earnings. Reported net profits are fully backed by operating cash receipts.")
+
+        if cfo_series and pat_series and assets_series and assets_series[-1] > 0:
+            latest_cfo = cfo_series[-1]
+            latest_pat = pat_series[-1]
+            latest_assets = assets_series[-1]
+            accrual_val = (latest_pat - latest_cfo) / latest_assets
+            accrual_pct = round(accrual_val * 100, 1)
+            if accrual_pct > 10.0:
+                add_flag("Sloan Accrual Anomaly", "🚩 RED FLAG", "High",
+                         f"Accruals Ratio: {accrual_pct}%",
+                         "Earnings are dominated by non-cash accruals rather than real cash flow (Sloan Ratio > 10%).")
+            elif accrual_pct > 5.0:
+                add_flag("Sloan Accrual Anomaly", "⚠️ WARNING", "Medium",
+                         f"Accruals Ratio: {accrual_pct}%",
+                         "Elevated accruals component in current year reported earnings.")
             else:
-                add_flag("Cumulative 3Y CFO vs PAT Conversion", "✅ CLEAR", "Low",
-                         f"3Y CFO: ₹{format_inr(sum_cfo)} Cr vs 3Y PAT: ₹{format_inr(sum_pat)} Cr ({cfo_pat_ratio}%)",
-                         "High-quality earnings. Reported net profits are fully backed by operating cash receipts.")
-        else:
-            add_flag("Cumulative 3Y CFO vs PAT Conversion", "ℹ️ INFO", "Low", "Cumulative PAT is negative", "Company is loss-making over evaluated period.")
+                add_flag("Sloan Accrual Anomaly", "✅ CLEAR", "Low",
+                         f"Accruals Ratio: {accrual_pct}%",
+                         "Safe accruals range. Earnings quality is grounded in cash realization.")
+    else:
+        # BFSI SPECIFIC FORENSIC AUDIT: Check Gross NPA trajectory
+        gnpa = safe_float(d.get("Gross NPA %"), safe_float(d.get("Gross NPA")))
+        if gnpa is not None:
+            if gnpa > 4.0:
+                add_flag("Gross NPA Overhang", "🚩 RED FLAG", "High", f"Gross NPA: {gnpa}%", "Elevated non-performing assets exceeding safe institutional threshold (3.0%).")
+            elif gnpa > 2.0:
+                add_flag("Gross NPA Overhang", "⚠️ WARNING", "Medium", f"Gross NPA: {gnpa}%", "Moderate asset quality impairment. Monitor credit provisioning.")
+            else:
+                add_flag("Gross NPA Overhang", "✅ CLEAR", "Low", f"Gross NPA: {gnpa}%", "Pristine loan book with very low non-performing assets.")
 
-    if cfo_series and pat_series and assets_series and assets_series[-1] > 0:
-        latest_cfo = cfo_series[-1]
-        latest_pat = pat_series[-1]
-        latest_assets = assets_series[-1]
-        accrual_val = (latest_pat - latest_cfo) / latest_assets
-        accrual_pct = round(accrual_val * 100, 1)
-        if accrual_pct > 10.0:
-            add_flag("Sloan Accrual Anomaly", "🚩 RED FLAG", "High",
-                     f"Accruals Ratio: {accrual_pct}%",
-                     "Earnings are dominated by non-cash accruals rather than real cash flow (Sloan Ratio > 10%).")
-        elif accrual_pct > 5.0:
-            add_flag("Sloan Accrual Anomaly", "⚠️ WARNING", "Medium",
-                     f"Accruals Ratio: {accrual_pct}%",
-                     "Elevated accruals component in current year reported earnings.")
-        else:
-            add_flag("Sloan Accrual Anomaly", "✅ CLEAR", "Low",
-                     f"Accruals Ratio: {accrual_pct}%",
-                     "Safe accruals range. Earnings quality is grounded in cash realization.")
-
-    if len(sales_series) >= 2:
-        sales_growth = round(((sales_series[-1] - sales_series[-2]) / abs(sales_series[-2])) * 100, 1) if sales_series[-2] != 0 else 0.0
-        cfo_growth = round(((cfo_series[-1] - cfo_series[-2]) / abs(cfo_series[-2])) * 100, 1) if len(cfo_series) >= 2 and cfo_series[-2] != 0 else 0.0
-        if sales_growth > 15.0 and cfo_growth < -20.0:
-            add_flag("Sales vs Cash Flow Decoupling", "🚩 RED FLAG", "High",
-                     f"Sales Growth: +{sales_growth}% vs CFO Growth: {cfo_growth}%",
-                     "Top-line expansion paired with sharp cash contraction. Suggests uncollected receivables or inventory build.")
-        else:
-            add_flag("Sales vs Cash Flow Decoupling", "✅ CLEAR", "Low",
-                     f"Sales: {sales_growth:+0.1f}% | CFO: {cfo_growth:+0.1f}%",
-                     "Top-line progression is not aggressively disconnected from operational cash velocity.")
-
+    # Universal Promoter Pledge Screen
     pledge_val = safe_float(d.get("Pledge_Latest"), 0.0)
     if pledge_val > 15.0:
         add_flag("Promoter Share Encumbrance", "🚩 RED FLAG", "High",
@@ -350,7 +359,8 @@ def evaluate_forensic_red_flags(d: dict):
                  f"Pledged Shares: {pledge_val}%",
                  "Zero or negligible promoter pledge (< 5%). No encumbrance overhang.")
 
-    if not d.get("is_bfsi") and len(borrowings) >= 3:
+    # Non-BFSI Leverage check
+    if archetype != "BFSI" and len(borrowings) >= 3:
         debt_start = borrowings[-3]
         debt_end = borrowings[-1]
         if debt_start > 0:
@@ -367,21 +377,6 @@ def evaluate_forensic_red_flags(d: dict):
                 add_flag("Leverage Expansion Trajectory", "✅ CLEAR", "Low",
                          f"Borrowings change: {debt_chg:+0.1f}%",
                          "Stable or declining debt trajectory.")
-
-    if cfo_series:
-        neg_cfo_count = sum(1 for x in cfo_series[-4:] if x < 0)
-        if neg_cfo_count >= 2:
-            add_flag("Negative Operating Cash Flow Recurrence", "🚩 RED FLAG", "High",
-                     f"Negative CFO in {neg_cfo_count} of the last 4 fiscal years",
-                     "Structural cash drain. Core operations are burning rather than generating cash.")
-        elif neg_cfo_count == 1:
-            add_flag("Negative Operating Cash Flow Recurrence", "⚠️ WARNING", "Medium",
-                     f"Negative CFO in 1 of the last 4 fiscal years",
-                     "Occasional operational cash deficit detected.")
-        else:
-            add_flag("Negative Operating Cash Flow Recurrence", "✅ CLEAR", "Low",
-                     "Positive CFO across all recent 4 fiscal years",
-                     "Consistent operational cash generation.")
 
     df_flags = pd.DataFrame(flags)
     red_count = sum(1 for f in flags if "RED FLAG" in f["Status"])
@@ -454,8 +449,8 @@ def scrape_full_screener(symbol: str):
         if sub_text:
             sector_txt = sub_text.text.strip()
     data["Sector_Desc"] = sector_txt
-    data["is_bfsi"] = any(kw in sector_txt.lower() or kw in data["Company Name"].lower() 
-                          for kw in ["bank", "finance", "nbfc", "housing finance", "financial services", "insurance"])
+    data["Archetype"] = resolve_sector_archetype(sector_txt, data["Company Name"])
+    data["is_bfsi"] = (data["Archetype"] == "BFSI")
 
     company_id_match = re.search(r'data-company-id="(\d+)"', res.text) or re.search(r'/api/company/(\d+)/', res.text)
     company_id = company_id_match.group(1) if company_id_match else None
@@ -569,6 +564,23 @@ def scrape_full_screener(symbol: str):
                 return vals
         return []
 
+    # Sector Metrics Extraction
+    if data["Archetype"] == "BFSI":
+        # Extract NPA and ROA metrics from ratios or tables
+        for row_label in ["Gross NPA", "Net NPA", "Financing Margin"]:
+            series = get_row_series(data["df_pl"], row_label)
+            if series:
+                data[f"{row_label}_Latest"] = series[-1]
+        data["Price_to_Book"] = safe_float(data.get("Price to book value"), safe_float(data.get("ROA")))
+    elif data["Archetype"] == "IT":
+        # Extract Employee Costs % of Sales
+        sales_ser = get_row_series(data["df_pl"], "Sales")
+        emp_ser = get_row_series(data["df_pl"], "Employee Cost")
+        if not emp_ser:
+            emp_ser = get_row_series(data["df_pl"], "Expenses")
+        if sales_ser and emp_ser and sales_ser[-1] > 0:
+            data["Employee_Cost_Pct"] = round((emp_ser[-1] / sales_ser[-1]) * 100, 1)
+
     def extract_compound_table(keyword):
         tables = soup.find_all('table', class_='ranges-table')
         for t in tables:
@@ -664,7 +676,7 @@ def scrape_full_screener(symbol: str):
     else:
         data["CFO_OP_Ratio"] = None
         data["Latest_CFO"] = None
-        data["CFO_OP_Period"] = "BFSI Waived"
+        data["CFO_OP_Period"] = "BFSI Exempt"
 
     mcap = safe_float(data.get("Market Cap"), 0.0)
     if data.get("Latest_CFO") and data["Latest_CFO"] > 0 and mcap > 0:
@@ -681,21 +693,6 @@ def scrape_full_screener(symbol: str):
             "Test": "Balance Sheet Balance Check",
             "Details": f"Assets: ₹{format_inr(tot_assets[-1])} Cr | Liabilities: ₹{format_inr(tot_liab[-1])} Cr",
             "Result": "🟢 Matched & Balanced" if bs_diff < 1.0 else "🔴 Imbalance Detected"
-        })
-
-    if op_series and len(op_series) >= 4 and s3_eb and e3_eb:
-        test_calc = round(((e3_eb / s3_eb) ** (1.0 / 3.0) - 1.0) * 100.0, 1)
-        data["audit_checks"].append({
-            "Test": "3-Year EBITDA CAGR Math Integrity",
-            "Details": f"Formula: ({format_inr(e3_eb)} / {format_inr(s3_eb)})^(1/3) - 1 = {test_calc}%",
-            "Result": "🟢 Formula Verified"
-        })
-
-    if data.get("CFO_OP_Ratio") is not None and data.get("CFO_OP_Period") not in ["N/A", "BFSI Waived"]:
-        data["audit_checks"].append({
-            "Test": f"Time-Matched CFO/OP Check ({data['CFO_OP_Period']})",
-            "Details": f"CFO: ₹{format_inr(data['Latest_CFO'])} Cr / OP: ₹{format_inr(data['Latest_OP_Annual'])} Cr = {data['CFO_OP_Ratio']}%",
-            "Result": "🟢 Audited Period Matched"
         })
 
     promoter_vals = get_row_series(data["df_shareholding"], "Promoters")
@@ -740,25 +737,6 @@ def scrape_full_screener(symbol: str):
     else:
         data["Interest_Coverage"] = None
 
-    f_score = 0
-    net_profit_vals = get_row_series(data["df_pl"], "Net Profit")
-    if net_profit_vals and net_profit_vals[-1] > 0:
-        f_score += 1
-    if cfo_series and cfo_series[-1] > 0:
-        f_score += 1
-    if cfo_series and net_profit_vals and cfo_series[-1] > net_profit_vals[-1]:
-        f_score += 1
-    if net_profit_vals and len(net_profit_vals) >= 2 and net_profit_vals[-1] > net_profit_vals[-2]:
-        f_score += 1
-    if borrowings and len(borrowings) >= 2 and borrowings[-1] <= borrowings[-2]:
-        f_score += 1
-    if other_assets and other_liab and len(other_assets) >= 2 and len(other_liab) >= 2:
-        cr_curr = other_assets[-1] / (other_liab[-1] if other_liab[-1] > 0 else 1.0)
-        cr_prev = other_assets[-2] / (other_liab[-2] if other_liab[-2] > 0 else 1.0)
-        if cr_curr >= cr_prev:
-            f_score += 1
-    data["Piotroski_Score"] = f_score
-
     cmp_val = safe_float(data.get("Current Price"), 0.0)
     high_low_str = str(data.get("High / Low", ""))
     high_low_match = re.findall(r"[-+]?\d*\.?\d+", high_low_str.replace(',', ''))
@@ -772,9 +750,10 @@ def scrape_full_screener(symbol: str):
 
     return data
 
-# ----------------- SCORING ENGINE -----------------
+# ----------------- SECTOR-ADAPTIVE SCORING ENGINE -----------------
 def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     results = []
+    archetype = m.get("Archetype", "GENERAL")
 
     def add_item(category, name, current_val, points, max_pts, status, guideline):
         results.append({
@@ -788,34 +767,69 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             "Guideline / Benchmark": guideline
         })
 
+    # UNIVERSAL OVERVIEW
     add_item("Overview", "NSE Symbol", m.get("Symbol"), 0, 0, "ℹ️ Info", "Stock Ticker")
-    add_item("Overview", "Sector & Index", m.get("Sector_Desc", "General"), 0, 0, "ℹ️ Info", "Sectoral trend / Index membership")
+    add_item("Overview", "Sector & Archetype", f"{m.get('Sector_Desc', 'General')} [{archetype}]", 0, 0, "ℹ️ Info", "Detected Sector Model")
     add_item("Overview", "CMP (Live)", f"₹{format_inr(m.get('Current Price'))}", 0, 0, "ℹ️ Info", "Live Market Price")
-    add_item("Overview", "Book Value (Audited)", f"₹{format_inr(m.get('Book Value'))}", 0, 0, "ℹ️ Info", "Reported Book Value")
-    add_item("Overview", "Face Value", f"₹{m.get('Face Value', 'N/A')}", 0, 0, "ℹ️ Info", "Nominal Share Par Value")
-    add_item("Overview", "Dividend Yield (TTM)", f"{m.get('Dividend Yield', 0.0)}%", 0, 0, "ℹ️ Info", "For Info (Low does not necessarily mean Bad)")
+    add_item("Overview", "Book Value", f"₹{format_inr(m.get('Book Value'))}", 0, 0, "ℹ️ Info", "Reported Book Value")
 
-    dist_h = safe_float(m.get("Dist_High_Pct"))
-    dist_l = safe_float(m.get("Dist_Low_Pct"))
-    if dist_h is not None and dist_l is not None:
-        if dist_h <= 2.5:
-            add_item("Valuation", "52W H/L Proximity", f"{dist_h}% below 52W High", 3, 5, "🟡 Caution", "CMP very close to 52H — Treat with caution")
-        elif dist_l <= 4.0:
-            add_item("Valuation", "52W H/L Proximity", f"{dist_l}% above 52W Low", 1, 5, "🔴 Caution", "CMP very close to 52W Low — Treat with caution")
-        else:
-            add_item("Valuation", "52W H/L Proximity", f"H: ₹{format_inr(m.get('52W_High'))} | L: ₹{format_inr(m.get('52W_Low'))}", 5, 5, "🟢 Pass", "Balanced zone within 52W range")
-    else:
-        add_item("Valuation", "52W H/L Proximity", "N/A", 3, 5, "ℹ️ Info", "Proximity to 52W High/Low bounds")
-
+    # 1. SOLVENCY, ASSET QUALITY & CAPITAL BASE
     mcap = safe_float(m.get("Market Cap"), 0.0)
     if mcap >= 1000:
-        add_item("Solvency & Scale", "Market Cap", f"₹{format_inr(mcap)} Cr", 10, 10, "🟢 Pass", "Above ₹1,000 Cr liquidity filter")
+        add_item("Solvency & Scale", "Market Cap", f"₹{format_inr(mcap)} Cr", 10, 10, "🟢 Pass", "Above ₹1,000 Cr institutional liquidity threshold")
     else:
-        add_item("Solvency & Scale", "Market Cap", f"₹{format_inr(mcap)} Cr", 1, 10, "🔴 Caution", "Below 1000 cr generally avoidable, until compelling story exists")
+        add_item("Solvency & Scale", "Market Cap", f"₹{format_inr(mcap)} Cr", 2, 10, "🔴 Caution", "Small-cap threshold (< ₹1,000 Cr)")
 
-    if m.get("is_bfsi"):
-        add_item("Solvency & Scale", "Debt to Equity (Audited)", "BFSI Exempt", 15, 15, "🟢 Pass", "Exempt for BFSI")
+    if archetype == "BFSI":
+        # BFSI: Drop D/E and Current Ratio; substitute with Asset Quality (NPA) & Balance Sheet Quality
+        gnpa = safe_float(m.get("Gross NPA_Latest"), safe_float(m.get("Gross NPA %"), safe_float(m.get("Gross NPA"))))
+        if gnpa is not None:
+            if gnpa <= 1.5:
+                add_item("Asset Quality", "Gross NPA %", f"{gnpa}%", 15, 15, "🟢 Pass", "Superior asset quality (GNPA <= 1.5%)")
+            elif gnpa <= 3.0:
+                add_item("Asset Quality", "Gross NPA %", f"{gnpa}%", 10, 15, "🟢 Pass", "Acceptable banking asset quality (1.5% - 3.0%)")
+            else:
+                add_item("Asset Quality", "Gross NPA %", f"{gnpa}%", 0, 15, "🔴 Caution", "Impaired loan book (GNPA > 3.0%)")
+        else:
+            add_item("Asset Quality", "Capital Base / Solvency", "RBI Regulated", 15, 15, "🟢 Pass", "BFSI statutory capital compliance")
+
+        # ROA Metric for Banks
+        roa = safe_float(m.get("ROA"), safe_float(m.get("Return on assets")))
+        if roa is not None:
+            if roa >= 1.5:
+                add_item("Capital Efficiency", "Return on Assets (ROA)", f"{roa}%", 15, 15, "🟢 Pass", "Strong banking asset efficiency (ROA >= 1.5%)")
+            elif roa >= 1.0:
+                add_item("Capital Efficiency", "Return on Assets (ROA)", f"{roa}%", 10, 15, "🟢 Pass", "Acceptable banking return (1.0% - 1.5%)")
+            else:
+                add_item("Capital Efficiency", "Return on Assets (ROA)", f"{roa}%", 2, 15, "🔴 Caution", "Sub-optimal bank profitability (ROA < 1.0%)")
+        else:
+            # Fallback to Net Profit Margin for financial entities
+            add_item("Capital Efficiency", "Return on Assets (ROA)", "Benchmarked via ROE", 10, 15, "ℹ️ Info", "ROA embedded in ROE")
+
+    elif archetype == "IT":
+        # IT SERVICES: Verify Net Cash / Zero Debt Balance Sheet
+        de = safe_float(m.get("Calculated_DE"), 0.0)
+        if de <= 0.1:
+            add_item("Solvency & Scale", "Balance Sheet Leverage", f"Virtually Zero Debt (D/E: {de})", 15, 15, "🟢 Pass", "Net Cash pristine balance sheet")
+        elif de <= 0.3:
+            add_item("Solvency & Scale", "Balance Sheet Leverage", f"Low Debt (D/E: {de})", 10, 15, "🟢 Pass", "Minimal debt exposure")
+        else:
+            add_item("Solvency & Scale", "Balance Sheet Leverage", f"Elevated Debt (D/E: {de})", 0, 15, "🔴 Caution", "Unusual debt leverage for a technology services model")
+
+        # Employee Cost Intensity Check
+        emp_pct = safe_float(m.get("Employee_Cost_Pct"))
+        if emp_pct is not None:
+            if 48.0 <= emp_pct <= 60.0:
+                add_item("Operational Efficiency", "Employee Cost % of Revenue", f"{emp_pct}%", 15, 15, "🟢 Pass", "Balanced talent cost & margin control (48% - 60%)")
+            elif emp_pct < 48.0:
+                add_item("Operational Efficiency", "Employee Cost % of Revenue", f"{emp_pct}%", 12, 15, "🟢 Pass", "High-margin delivery structure")
+            else:
+                add_item("Operational Efficiency", "Employee Cost % of Revenue", f"{emp_pct}%", 5, 15, "🟡 Caution", "Elevated talent bill (> 60% of revenue); margin pressure")
+        else:
+            add_item("Operational Efficiency", "Operating Margin (OPM)", f"{m.get('OPM', 'N/A')}%", 12, 15, "🟢 Pass", "Margin delivery check")
+
     else:
+        # GENERAL / MANUFACTURING: Standard Leverage & Liquidity
         de = safe_float(m.get("Calculated_DE"), 0.0)
         if de >= 900:
             add_item("Solvency & Scale", "Debt to Equity (Audited)", "Negative Net Worth", 0, 15, "🔴 Caution", "Distress: Net worth wiped out by debt")
@@ -824,48 +838,51 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         elif de <= 0.8:
             add_item("Solvency & Scale", "Debt to Equity (Audited)", f"{de}", 10, 15, "🟢 Pass", "Safe leverage range (<= 0.8)")
         else:
-            add_item("Solvency & Scale", "Debt to Equity (Audited)", f"{de}", 0, 15, "🔴 Caution", "If more than 0.8 do thorough checking (Except BFSI)")
+            add_item("Solvency & Scale", "Debt to Equity (Audited)", f"{de}", 0, 15, "🔴 Caution", "Elevated leverage (> 0.8)")
 
-    cr = safe_float(m.get("Current_Ratio"))
-    if cr is not None and not m.get("is_bfsi"):
-        if cr > 1.2:
-            add_item("Solvency & Scale", "Current Ratio", f"{cr}", 10, 10, "🟢 Pass", "Comfortable liquidity buffer (> 1.2)")
-        elif cr > 1.0:
-            add_item("Solvency & Scale", "Current Ratio", f"{cr}", 6, 10, "🟡 Caution", "Borderline working capital (1.0 to 1.2)")
+        cr = safe_float(m.get("Current_Ratio"))
+        if cr is not None:
+            if cr > 1.2:
+                add_item("Solvency & Scale", "Current Ratio", f"{cr}", 10, 10, "🟢 Pass", "Comfortable liquidity buffer (> 1.2)")
+            elif cr > 1.0:
+                add_item("Solvency & Scale", "Current Ratio", f"{cr}", 6, 10, "🟡 Caution", "Borderline working capital (1.0 to 1.2)")
+            else:
+                add_item("Solvency & Scale", "Current Ratio", f"{cr}", 0, 10, "🔴 Caution", "Tight liquidity (< 1.0)")
         else:
-            add_item("Solvency & Scale", "Current Ratio", f"{cr}", 0, 10, "🔴 Caution", "If less than or = 1, be cautious")
-    else:
-        add_item("Solvency & Scale", "Current Ratio", "BFSI Waived/NA", 10, 10, "🟢 Pass", "Waived for financial models or unavailable")
+            add_item("Solvency & Scale", "Current Ratio", "N/A", 5, 10, "ℹ️ Info", "Working capital data unavailable")
 
-    ic = safe_float(m.get("Interest_Coverage"))
-    if ic is not None and not m.get("is_bfsi"):
-        if ic >= 4.0:
-            add_item("Solvency & Scale", "Interest Coverage", f"{ic}x", 5, 5, "🟢 Pass", "Comfortable debt serviceability (> 4x)")
-        elif ic >= 2.0:
-            add_item("Solvency & Scale", "Interest Coverage", f"{ic}x", 3, 5, "🟡 Caution", "Moderate debt burden (2x to 4x)")
-        else:
-            add_item("Solvency & Scale", "Interest Coverage", f"{ic}x", 0, 5, "🔴 Fail", "High risk: Operating earnings fail to cover interest (< 2x)")
-    else:
-        add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
-
+    # 2. VALUATION METRICS
     pe = safe_float(m.get("Stock P/E"))
     ind_pe = safe_float(m.get("Industry PE"))
-    if pe is not None and pe > 0:
-        if ind_pe is not None and ind_pe > 0:
-            spread = pe - ind_pe
-            if spread > 25:
-                add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 4, 10, "🟡 Caution", "Way above Industry PE / check 10-15 yr PE chart & Mean")
-            elif spread < -15:
-                add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 7, 10, "🟡 Caution", "Way below Industry PE / check for value trap")
+    
+    if archetype == "BFSI":
+        pb = safe_float(m.get("Price to book value"))
+        if pb is not None and pb > 0:
+            if pb <= 1.8:
+                add_item("Valuation", "Price to Book (P/B)", f"{pb}x", 10, 10, "🟢 Pass", "Attractive banking valuation multiple (P/B <= 1.8x)")
+            elif pb <= 3.0:
+                add_item("Valuation", "Price to Book (P/B)", f"{pb}x", 7, 10, "🟢 Pass", "Standard institutional valuation (1.8x - 3.0x)")
             else:
-                add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 10, 10, "🟢 Pass", "Aligned with Industry PE")
-        else:
-            if pe <= 35:
-                add_item("Valuation", "Stock P/E (TTM)", f"{pe}", 10, 10, "🟢 Pass", "Reasonable valuation multiple")
-            else:
-                add_item("Valuation", "Stock P/E (TTM)", f"{pe}", 5, 10, "🟡 Caution", "Elevated standalone P/E")
+                add_item("Valuation", "Price to Book (P/B)", f"{pb}x", 3, 10, "🟡 Caution", "High premium multiple (> 3.0x P/B)")
+        elif pe:
+            add_item("Valuation", "Stock P/E", f"{pe}", 8, 10, "🟢 Pass", "P/E multiple baseline")
     else:
-        add_item("Valuation", "Stock P/E (TTM)", "Loss Making / Distressed", 0, 10, "🔴 Fail", "Company has negative earnings (No P/E)")
+        if pe is not None and pe > 0:
+            if ind_pe is not None and ind_pe > 0:
+                spread = pe - ind_pe
+                if spread > 25:
+                    add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 4, 10, "🟡 Caution", "Way above Industry PE")
+                elif spread < -15:
+                    add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 7, 10, "🟡 Caution", "Trading at steep discount; verify value trap")
+                else:
+                    add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 10, 10, "🟢 Pass", "Aligned with Industry PE")
+            else:
+                if pe <= 35:
+                    add_item("Valuation", "Stock P/E (TTM)", f"{pe}", 10, 10, "🟢 Pass", "Reasonable valuation multiple")
+                else:
+                    add_item("Valuation", "Stock P/E (TTM)", f"{pe}", 5, 10, "🟡 Caution", "Elevated standalone P/E")
+        else:
+            add_item("Valuation", "Stock P/E (TTM)", "Negative Earnings", 0, 10, "🔴 Fail", "Loss-making")
 
     if pe_stats and pe_stats.get("5Y_Median") != "N/A":
         med_5 = pe_stats["5Y_Median"]
@@ -878,125 +895,49 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 2, 5, "🟡 Caution", "Elevated relative to historical baseline")
 
-    p_cf = safe_float(m.get("Price_to_CashFlow"))
-    if p_cf is not None and not m.get("is_bfsi"):
-        if p_cf <= 20:
-            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 5, 5, "🟢 Pass", "Healthy cash multiple")
-        elif p_cf > 35:
-            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 2, 5, "🟡 Caution", "Very high — check if in capex growth phase")
-        else:
-            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 4, 5, "🟢 Pass", "Moderate cash multiple")
-    else:
-        add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO / NA", 0, 5, "🔴 Caution", "Negative cash flow or data unavailable")
-
-    cfo_op = safe_float(m.get("CFO_OP_Ratio"))
-    cfo_period = m.get("CFO_OP_Period", "")
-    if cfo_op is not None and not m.get("is_bfsi"):
-        period_label = f" [{cfo_period}]" if cfo_period else ""
-        if cfo_op >= 100:
-            add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 15, 15, "🟢 Pass", "Comfortable range: If => 100 very good")
-        elif cfo_op >= 60:
-            add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 12, 15, "🟢 Pass", "Comfortable range: 60-80%")
-        elif cfo_op < 50:
-            add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 2, 15, "🔴 Caution", "If < 50 be cautious (Operating profit not translating to cash)")
-        else:
-            add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 8, 15, "🟡 Moderate", "Acceptable range (50-60%)")
-    else:
-        add_item("Capital Efficiency", "CFO / OP (Audited)", "BFSI Waived / Neg", 10, 15, "ℹ️ Info", "Exempt for BFSI or negative CFO")
-
+    # 3. CAPITAL RETURNS & CASH CONVERSION
     roe = safe_float(m.get("ROE"))
-    avg_roe = safe_float(m.get("3Yr_Avg_ROE"))
-    roce = safe_float(m.get("ROCE"))
-
     if roe is not None and roe >= 15:
         add_item("Capital Efficiency", "ROE (Latest FY)", f"{roe}%", 10, 10, "🟢 Pass", "Strong return on equity (> 15%)")
     elif roe is not None and roe > 0:
-        add_item("Capital Efficiency", "ROE (Latest FY)", f"{roe}%", 4, 10, "🟡 Moderate", "Moderate/low ROE (< 15%)")
+        add_item("Capital Efficiency", "ROE (Latest FY)", f"{roe}%", 5, 10, "🟡 Moderate", "Moderate ROE (< 15%)")
     else:
-        add_item("Capital Efficiency", "ROE (Latest FY)", f"{roe}%" if roe is not None else "Negative", 0, 10, "🔴 Fail", "Sub-zero or negative shareholder returns")
+        add_item("Capital Efficiency", "ROE (Latest FY)", "Negative", 0, 10, "🔴 Fail", "Capital dilutive")
 
-    if roe is not None and avg_roe is not None:
-        diff_avg = abs(roe - avg_roe)
-        if diff_avg > 8.0:
-            add_item("Capital Efficiency", "3 Yrs Avg ROE Check", f"Latest: {roe}% vs 3Yr Avg: {avg_roe}%", 3, 5, "🟡 Caution", "Sharp change from 3yrs Avg, check reason - including Corp Action")
+    if archetype != "BFSI":
+        cfo_op = safe_float(m.get("CFO_OP_Ratio"))
+        cfo_period = m.get("CFO_OP_Period", "")
+        if cfo_op is not None:
+            period_label = f" [{cfo_period}]" if cfo_period else ""
+            if cfo_op >= 100:
+                add_item("Capital Efficiency", "CFO / OP Conversion", f"{cfo_op}%{period_label}", 15, 15, "🟢 Pass", "High cash conversion (>= 100%)")
+            elif cfo_op >= 60:
+                add_item("Capital Efficiency", "CFO / OP Conversion", f"{cfo_op}%{period_label}", 12, 15, "🟢 Pass", "Sound conversion range (60-80%)")
+            else:
+                add_item("Capital Efficiency", "CFO / OP Conversion", f"{cfo_op}%{period_label}", 3, 15, "🔴 Caution", "Profits delayed in working capital (< 60%)")
         else:
-            add_item("Capital Efficiency", "3 Yrs Avg ROE Check", f"Latest: {roe}% vs 3Yr Avg: {avg_roe}%", 5, 5, "🟢 Pass", "Consistent with 3-year average")
-    else:
-        add_item("Capital Efficiency", "3 Yrs Avg ROE Check", "N/A", 3, 5, "ℹ️ Info", "Historical average unavailable")
+            add_item("Capital Efficiency", "CFO / OP Conversion", "N/A", 8, 15, "ℹ️ Info", "Cash conversion data not reported")
 
-    if roe is not None and roce is not None and not m.get("is_bfsi"):
-        if (roe - roce) > 10:
-            add_item("Capital Efficiency", "ROE vs ROCE Integrity", f"ROE: {roe}% >> ROCE: {roce}%", 2, 10, "🔴 Caution", "ROE very high than ROCE: Check if inflated due to Debt / buyback")
-        elif (roce - roe) > 8:
-            add_item("Capital Efficiency", "ROE vs ROCE Integrity", f"ROCE: {roce}% >> ROE: {roe}%", 5, 10, "🟡 Caution", "ROCE >> ROE: Check reason - cost of borrowing / sudden tax burden etc")
-        elif roe > 0 and roce > 0:
-            add_item("Capital Efficiency", "ROE vs ROCE Integrity", f"ROE: {roe}% | ROCE: {roce}%", 10, 10, "🟢 Pass", "Balanced parity between ROE and ROCE")
-        else:
-            add_item("Capital Efficiency", "ROE vs ROCE Integrity", f"ROE: {roe}% | ROCE: {roce}%", 0, 10, "🔴 Fail", "Negative capital returns")
-    else:
-        add_item("Capital Efficiency", "ROE vs ROCE Integrity", f"ROCE: {roce}%" if roce is not None else "N/A", 5, 10, "ℹ️ Info", "ROCE Check")
-
+    # 4. GOVERNANCE & SHAREHOLDING
     pledge = safe_float(m.get("Pledge_Latest"), 0.0)
     if pledge == 0:
-        add_item("Ownership & Governance", "Prom. Pledge", "0.0%", 10, 10, "🟢 Pass", "Zero is preferred")
+        add_item("Ownership & Governance", "Promoter Pledge", "0.0%", 10, 10, "🟢 Pass", "Zero encumbrance")
     elif pledge < 5:
-        add_item("Ownership & Governance", "Prom. Pledge", f"{pledge}%", 5, 10, "🟡 Caution", "Minor pledge present (< 5%)")
+        add_item("Ownership & Governance", "Promoter Pledge", f"{pledge}%", 5, 10, "🟡 Caution", "Minor pledge present (< 5%)")
     else:
-        add_item("Ownership & Governance", "Prom. Pledge", f"{pledge}%", 0, 10, "🔴 Caution", "Warning: Pledged shares > 5%")
-
-    def format_hist(arr):
-        return " → ".join([f"{x:.1f}%" for x in arr]) if arr else "N/A"
+        add_item("Ownership & Governance", "Promoter Pledge", f"{pledge}%", 0, 10, "🔴 Caution", "High pledge overhang (> 5%)")
 
     fii_val = safe_float(m.get("FII_Latest"), 0.0)
-    fii_hist = format_hist(m.get("FII_History", []))
     if m.get("FII_Trend") == "Increasing":
-        add_item("Ownership & Governance", "FII Holding (Last 5-6 Qtrs QoQ)", f"{fii_val}% [{fii_hist}]", 5, 5, "🟢 Pass", "Check last 5-6 Qtrs, QoQ (FII accumulating)")
+        add_item("Ownership & Governance", "FII Trend (QoQ)", f"{fii_val}% [Accumulating]", 5, 5, "🟢 Pass", "FIIs increasing ownership")
     else:
-        add_item("Ownership & Governance", "FII Holding (Last 5-6 Qtrs QoQ)", f"{fii_val}% [{fii_hist}]", 2, 5, "🟡 Moderate", "Check last 5-6 Qtrs, QoQ (FII reduced QoQ)")
+        add_item("Ownership & Governance", "FII Trend (QoQ)", f"{fii_val}% [Trimming]", 3, 5, "🟡 Moderate", "FII ownership flat or reduced")
 
     dii_val = safe_float(m.get("DII_Latest"), 0.0)
-    dii_hist = format_hist(m.get("DII_History", []))
     if m.get("DII_Trend") == "Increasing":
-        add_item("Ownership & Governance", "DII Holding (Last 5-6 Qtrs QoQ)", f"{dii_val}% [{dii_hist}]", 5, 5, "🟢 Pass", "Check last 5-6 Qtrs, QoQ (DII accumulating)")
+        add_item("Ownership & Governance", "DII Trend (QoQ)", f"{dii_val}% [Accumulating]", 5, 5, "🟢 Pass", "Domestic institutional accumulation")
     else:
-        add_item("Ownership & Governance", "DII Holding (Last 5-6 Qtrs QoQ)", f"{dii_val}% [{dii_hist}]", 2, 5, "🟡 Moderate", "Check last 5-6 Qtrs, QoQ (DII reduced QoQ)")
-
-    prom_val = safe_float(m.get("Promoter_Latest"), 0.0)
-    prom_hist = format_hist(m.get("Promoter_History", []))
-    total_inst = safe_float(m.get("FII_Latest"), 0.0) + safe_float(m.get("DII_Latest"), 0.0)
-
-    if prom_val == 0.0 and total_inst >= 50.0:
-        add_item(
-            "Ownership & Governance",
-            "Prom Holding (Last 5-6 Qtrs QoQ)",
-            "0.0% [Professionally Managed]",
-            5,
-            5,
-            "🟢 Pass",
-            f"Professionally managed / board-run entity (Institutional Custody: {total_inst:.1f}% FII+DII)"
-        )
-    elif prom_val >= 50 or m.get("Promoter_Trend") == "Increasing":
-        add_item("Ownership & Governance", "Prom Holding (Last 5-6 Qtrs QoQ)", f"{prom_val}% [{prom_hist}]", 5, 5, "🟢 Pass", "Check last 5-6 Qtrs, QoQ (Strong promoter ownership)")
-    else:
-        add_item("Ownership & Governance", "Prom Holding (Last 5-6 Qtrs QoQ)", f"{prom_val}% [{prom_hist}]", 3, 5, "🟡 Caution", "Check last 5-6 Qtrs, QoQ (Promoter holding declined / low)")
-
-    s_cagr = safe_float(m.get("3Yr_Sales_CAGR"))
-    p_cagr = safe_float(m.get("3Yr_PAT_CAGR"))
-    if s_cagr is not None:
-        if s_cagr >= 12:
-            add_item("Capital Efficiency", "3 Yr Sales CAGR", f"{s_cagr}%", 5, 5, "🟢 Pass", "Healthy double-digit expansion (> 12%)")
-        else:
-            add_item("Capital Efficiency", "3 Yr Sales CAGR", f"{s_cagr}%", 2, 5, "🟡 Moderate", "Sub-12% top-line growth")
-    else:
-        add_item("Capital Efficiency", "3 Yr Sales CAGR", "N/A", 2, 5, "ℹ️ Info", "Sales CAGR data not reported")
-
-    if p_cagr is not None:
-        if p_cagr >= 12:
-            add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 5, 5, "🟢 Pass", "Strong profit expansion (> 12%)")
-        else:
-            add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 2, 5, "🟡 Moderate", "Sub-12% PAT growth")
-    else:
-        add_item("Capital Efficiency", "3 Yrs PAT CAGR", "N/A", 2, 5, "ℹ️ Info", "PAT CAGR data not reported")
+        add_item("Ownership & Governance", "DII Trend (QoQ)", f"{dii_val}% [Trimming]", 3, 5, "🟡 Moderate", "DII ownership flat or reduced")
 
     df = pd.DataFrame(results)
     scored_rows = df[df["MaxPts"] > 0]
@@ -1004,19 +945,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     total_max = scored_rows["MaxPts"].sum()
     composite = round((total_pts / total_max) * 100) if total_max > 0 else 0
 
-    cat_breakdown = {}
-    for cat in ["Solvency & Scale", "Valuation", "Capital Efficiency", "Ownership & Governance"]:
-        c_df = scored_rows[scored_rows["Category"] == cat]
-        if not c_df.empty and c_df["MaxPts"].sum() > 0:
-            cat_breakdown[cat] = {
-                "earned": int(c_df["Pts"].sum()),
-                "max": int(c_df["MaxPts"].sum()),
-                "pct": round(c_df["Pts"].sum() / c_df["MaxPts"].sum(), 2)
-            }
-        else:
-            cat_breakdown[cat] = {"earned": 0, "max": 10, "pct": 0.0}
-
-    return composite, df, cat_breakdown
+    return composite, df
 
 # ----------------- EXCEL EXPORT HELPER -----------------
 def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_table=None, df_forensics=None, df_dupont=None):
@@ -1038,10 +967,6 @@ def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_tab
             d["df_cf"].to_excel(writer, sheet_name='Cash Flow')
         if not d["df_shareholding"].empty:
             d["df_shareholding"].to_excel(writer, sheet_name='Shareholding')
-        if not d["df_peers"].empty:
-            d["df_peers"].to_excel(writer, sheet_name='Peers Comparison', index=False)
-        if d.get("audit_checks"):
-            pd.DataFrame(d["audit_checks"]).to_excel(writer, sheet_name='Integrity Audit', index=False)
     return output.getvalue()
 
 # ----------------- UI APPLICATION -----------------
@@ -1065,7 +990,7 @@ with sidebar.form("audit_form"):
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
 
 if ticker_input:
-    with st.spinner(f"Auditing institutional financials for {ticker_input}..."):
+    with st.spinner(f"Auditing financials for {ticker_input}..."):
         d = scrape_full_screener(ticker_input)
         
         df_annual_pe, pe_stats = compute_authentic_historical_pes(
@@ -1086,7 +1011,7 @@ if ticker_input:
     if not d:
         st.error(f"Unable to retrieve verified financials for '{ticker_input}'. Please check the symbol or verify on Screener.in.")
     else:
-        final_score, checklist_df, cat_scores = evaluate_exact_checklist(d, pe_stats)
+        final_score, checklist_df = evaluate_exact_checklist(d, pe_stats)
         
         extended_matrix = []
         for p in ["10 Years", "5 Years", "3 Years"]:
@@ -1127,41 +1052,22 @@ if ticker_input:
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("CMP (Live)", f"₹{format_inr(d.get('Current Price'))}")
         col2.metric("Market Cap", f"₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr")
-        col3.metric("Stock P/E (TTM)", d.get('Stock P/E', 'N/A'))
+        col3.metric("P/E (TTM)", d.get('Stock P/E', 'N/A'))
         col4.metric("Forensic Red Flags", f"{red_flags_cnt} High Risk", delta=f"{warnings_cnt} Cautions", delta_color="inverse")
-        col5.metric("Checklist Score", f"{final_score} / 100", delta="Pass" if final_score >= 70 else "Review")
+        col5.metric("Sector Score", f"{final_score} / 100", delta=d.get("Archetype"))
         
-        st.write(f"### {d.get('Company Name')} (`{d.get('Symbol')}`)")
+        st.write(f"### {d.get('Company Name')} (`{d.get('Symbol')}`) — *{d.get('Archetype')} Diagnostic Model*")
         if d.get("Sector_Desc"):
-            st.info(f"Sector / Peer Info: {d.get('Sector_Desc')}")
+            st.info(f"Sector Classification: {d.get('Sector_Desc')}")
 
         if red_flags_cnt >= 2:
-            st.error(f"**CRITICAL FORENSIC ALERT:** {red_flags_cnt} High-Risk accounting or cash-flow red flags detected. Inspect individual flags below.")
+            st.error(f"**CRITICAL ALERT:** {red_flags_cnt} High-Risk accounting or cash-flow red flags detected.")
         elif final_score >= 75:
-            st.success(f"**FINAL VERDICT: STRONG PASS ({final_score}/100)** — Sound fundamentals across balance sheet, cash conversion, and capital returns.")
+            st.success(f"**VERDICT: STRONG PASS ({final_score}/100)** — Sound fundamentals within {d.get('Archetype')} sector benchmarks.")
         elif final_score >= 55:
-            st.warning(f"**FINAL VERDICT: CONDITIONAL / WATCHLIST ({final_score}/100)** — Moderate profile. Review individual caution flags before entry.")
+            st.warning(f"**VERDICT: CONDITIONAL / WATCHLIST ({final_score}/100)** — Review individual caution flags before entry.")
         else:
-            st.error(f"**FINAL VERDICT: AVOID / HIGH CAUTION ({final_score}/100)** — Critical structural, leverage, or liquidity red flags detected.")
-
-        st.markdown("#### 🎯 Score Breakdown by Category")
-        pb1, pb2, pb3, pb4 = st.columns(4)
-        with pb1:
-            c_sol = cat_scores["Solvency & Scale"]
-            st.write(f"**Solvency & Scale**: {c_sol['earned']}/{c_sol['max']} pts")
-            st.progress(c_sol["pct"])
-        with pb2:
-            c_val = cat_scores["Valuation"]
-            st.write(f"**Valuation**: {c_val['earned']}/{c_val['max']} pts")
-            st.progress(c_val["pct"])
-        with pb3:
-            c_cap = cat_scores["Capital Efficiency"]
-            st.write(f"**Capital Returns**: {c_cap['earned']}/{c_cap['max']} pts")
-            st.progress(c_cap["pct"])
-        with pb4:
-            c_gov = cat_scores["Ownership & Governance"]
-            st.write(f"**Governance**: {c_gov['earned']}/{c_gov['max']} pts")
-            st.progress(c_gov["pct"])
+            st.error(f"**VERDICT: AVOID / HIGH CAUTION ({final_score}/100)** — Critical structural or valuation red flags detected.")
 
         st.divider()
 
@@ -1179,7 +1085,7 @@ if ticker_input:
 
         # TAB 1: SCORECARD
         with tab_scorecard:
-            st.markdown("#### Itemized Checklist Evaluation (Mapped to Institutional Guidelines)")
+            st.markdown(f"#### Sector-Adaptive Checklist ({d.get('Archetype')} Archetype)")
             def style_status(val):
                 if "Pass" in str(val):
                     return 'background-color: #d4edda; color: #155724; font-weight: bold;'
@@ -1218,7 +1124,6 @@ if ticker_input:
         with tab_financials:
             st.markdown("### 📑 Primary Financial Statements (₹ Cr)")
 
-            # 1. P&L Section
             if not d["df_pl"].empty:
                 st.markdown("#### 1. Profit & Loss Statement (₹ Cr)")
                 st.dataframe(format_financial_df(d["df_pl"]), use_container_width=True)
@@ -1227,7 +1132,6 @@ if ticker_input:
 
             st.divider()
 
-            # 2. Balance Sheet Section
             if not d["df_bs"].empty:
                 st.markdown("#### 2. Balance Sheet (₹ Cr)")
                 st.dataframe(format_financial_df(d["df_bs"]), use_container_width=True)
@@ -1236,7 +1140,6 @@ if ticker_input:
 
             st.divider()
 
-            # 3. Cash Flow Section
             if not d["df_cf"].empty:
                 st.markdown("#### 3. Cash Flow Statement (₹ Cr)")
                 st.dataframe(format_financial_df(d["df_cf"]), use_container_width=True)
@@ -1262,7 +1165,7 @@ if ticker_input:
 
         # TAB 5: HISTORICAL P/E BANDS
         with tab_pe_bands:
-            st.markdown("### 📊 Historical P/E Valuation Analysis & Multiple Trajectory")
+            st.markdown("### 📊 Historical Valuation Analysis & Trajectory")
 
             if pe_stats:
                 b1, b2, b3, b4 = st.columns(4)
@@ -1291,12 +1194,12 @@ if ticker_input:
 
         # TAB 6: FORENSIC RED FLAGS
         with tab_forensics:
-            st.markdown("### 🚩 Forensic Accounting & Earnings Quality Screen")
+            st.markdown("### 🚩 Forensic Accounting & Quality Screen")
 
             fc1, fc2, fc3 = st.columns(3)
             fc1.metric("Critical Red Flags", f"{red_flags_cnt}", delta="Clean" if red_flags_cnt == 0 else "High Risk", delta_color="inverse")
             fc2.metric("Warnings / Cautions", f"{warnings_cnt}", delta="Low Risk" if warnings_cnt <= 1 else "Moderate", delta_color="inverse")
-            fc3.metric("Earnings Quality Rating", "Low Accrual / High Quality" if red_flags_cnt == 0 else "Aggressive Accrual Profile")
+            fc3.metric("Quality Rating", "Institutional Grade" if red_flags_cnt == 0 else "Accrual Overhang")
 
             st.divider()
             
@@ -1321,7 +1224,7 @@ if ticker_input:
             if not d["df_peers"].empty:
                 st.dataframe(d["df_peers"], use_container_width=True, hide_index=True)
             else:
-                st.info("Live peers table could not be parsed directly. Check competitor rankings below:")
+                st.info("Live peers table could not be parsed directly.")
                 st.link_button(f"🔍 View {ticker_input} Peers on Screener", f"https://www.screener.in/company/{ticker_input}/#peers")
 
         # TAB 8: DATA INTEGRITY AUDIT
@@ -1334,10 +1237,9 @@ if ticker_input:
 
             st.divider()
             st.markdown("#### 🔍 Direct Cross-Verification Links")
-            st.write("Verify any individual cell directly on primary sources:")
             al1, al2 = st.columns(2)
             with al1:
-                st.link_button(f"🔗 Open Primary Screener Financial Page for {ticker_input}", f"https://www.screener.in/company/{ticker_input}/", use_container_width=True)
+                st.link_button(f"🔗 Open Primary Screener Page for {ticker_input}", f"https://www.screener.in/company/{ticker_input}/", use_container_width=True)
             with al2:
                 st.link_button(f"🔗 Open BSE India Corporate Filings for {ticker_input}", "https://www.bseindia.com/corporates/ann.html", use_container_width=True)
 
