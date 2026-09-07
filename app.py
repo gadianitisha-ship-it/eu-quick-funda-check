@@ -213,22 +213,24 @@ def compute_dupont_analysis(df_pl, df_bs):
     if df_pl is None or df_pl.empty or df_bs is None or df_bs.empty:
         return pd.DataFrame()
 
-    def get_row(df, kw):
+    def get_first_matching_row(df, keywords):
         for idx in df.index:
-            if kw.lower() in str(idx).lower():
-                return df.loc[idx]
+            idx_str = str(idx).lower()
+            for kw in keywords:
+                if kw.lower() in idx_str:
+                    return df.loc[idx]
         return None
 
-    sales_row = get_row(df_pl, "Sales") or get_row(df_pl, "Revenue") or get_row(df_pl, "Interest Earned")
-    pat_row = get_row(df_pl, "Net Profit")
-    assets_row = get_row(df_bs, "Total Assets")
-    eq_row = get_row(df_bs, "Equity Capital") or get_row(df_bs, "Share Capital")
-    res_row = get_row(df_bs, "Reserves")
+    sales_row = get_first_matching_row(df_pl, ["Sales", "Revenue", "Interest Earned"])
+    pat_row = get_first_matching_row(df_pl, ["Net Profit"])
+    assets_row = get_first_matching_row(df_bs, ["Total Assets"])
+    eq_row = get_first_matching_row(df_bs, ["Equity Capital", "Share Capital"])
+    res_row = get_first_matching_row(df_bs, ["Reserves"])
 
     if sales_row is None or pat_row is None or assets_row is None or eq_row is None:
         return pd.DataFrame()
 
-    common_years = [c for c in df_pl.columns if c in df_bs.columns and c.lower() != 'ttm']
+    common_years = [c for c in df_pl.columns if c in df_bs.columns and str(c).lower() != 'ttm']
     rows = []
 
     for y in common_years:
@@ -443,8 +445,6 @@ def scrape_full_screener(symbol: str):
     session.headers.update(HEADERS)
 
     soup = None
-    # 1. Try direct standalone first (canonical for banks/new listings like UJJIVANSFB)
-    # 2. Then try consolidated (for groups like TCS, INFY, etc.)
     urls_to_try = [
         f"https://www.screener.in/company/{symbol}/",
         f"https://www.screener.in/company/{symbol}/consolidated/"
@@ -455,7 +455,6 @@ def scrape_full_screener(symbol: str):
             r = session.get(u, timeout=5.0, allow_redirects=True)
             if r.status_code == 200 and len(r.text) > 1000:
                 temp_soup = BeautifulSoup(r.text, 'html.parser')
-                # Verify that actual statement tables exist
                 if temp_soup.find('section', {'id': re.compile(r'profit-loss|income|quarters|quarterly|balance-sheet', re.I)}):
                     soup = temp_soup
                     break
@@ -532,7 +531,7 @@ def scrape_full_screener(symbol: str):
     data["live_announcements"] = documents_list[:6]
     data["live_concalls"] = concall_list[:6]
 
-    # Quick Top Ratios (Supports ul#top-ratios and div.company-ratios)
+    # Quick Top Ratios
     top_ratios = soup.find('ul', {'id': 'top-ratios'}) or soup.find('div', class_='company-ratios')
     if top_ratios:
         for li in top_ratios.find_all(['li', 'div']):
@@ -1266,7 +1265,7 @@ if ticker_input:
         live_news = fetch_live_news(ticker_input)
         nse_delivery = fetch_nse_delivery_data(ticker_input)
         
-    if not d:
+    if not d or (d.get("df_pl", pd.DataFrame()).empty and d.get("df_quarters", pd.DataFrame()).empty):
         st.error(f"Unable to retrieve verified financials for '{ticker_input}'. Please check the symbol or verify on Screener.in.")
     else:
         final_score, checklist_df, cat_scores = evaluate_exact_checklist(d, pe_stats)
