@@ -105,7 +105,7 @@ def resolve_sector_archetype(sector_desc: str, company_name: str) -> str:
         return "PHARMA"
     return "GENERAL"
 
-# ----------------- REAL HISTORICAL PRICE & P/E ENGINE -----------------
+# ----------------- REAL HISTORICAL PRICE & P/E ENGINE (SPLIT UNADJUSTED) -----------------
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_real_historical_prices(symbol: str):
     price_map = {}
@@ -114,20 +114,37 @@ def fetch_real_historical_prices(symbol: str):
     try:
         ticker = f"{symbol.strip().upper()}.NS"
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="max")
+        hist = stock.history(period="max", auto_adjust=False)
         if hist.empty:
             ticker = f"{symbol.strip().upper()}.BO"
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="max")
+            hist = stock.history(period="max", auto_adjust=False)
             
         if not hist.empty:
             hist.index = pd.to_datetime(hist.index)
+            if hist.index.tz is not None:
+                hist.index = hist.index.tz_localize(None)
+                
+            splits = stock.splits
+            if not splits.empty and splits.index.tz is not None:
+                splits.index = splits.index.tz_localize(None)
+                
             curr_year = datetime.now().year
             for year in range(2012, curr_year + 1):
                 march_data = hist[(hist.index.year == year) & (hist.index.month == 3)]
                 if not march_data.empty:
-                    last_close = march_data['Close'].iloc[-1]
-                    price_map[f"Mar {year}"] = round(float(last_close), 1)
+                    last_row = march_data.iloc[-1]
+                    date_val = last_row.name
+                    adj_close = float(last_row['Close'])
+                    
+                    unadj_price = adj_close
+                    if not splits.empty:
+                        future_splits = splits[splits.index > date_val]
+                        if not future_splits.empty:
+                            split_factor = future_splits.prod()
+                            unadj_price = adj_close * split_factor
+                            
+                    price_map[f"Mar {year}"] = round(unadj_price, 1)
     except Exception:
         pass
     return price_map
@@ -140,7 +157,7 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     net_profit_row = None
     for idx in df_pl.index:
         idx_lower = str(idx).lower()
-        if any(k in idx_lower for k in ["eps", "earnings per share"]) and not eps_row:
+        if any(k in idx_lower for k in ["eps", "earnings per share", "basic eps"]) and not eps_row:
             eps_row = idx
         if any(k in idx_lower for k in ["net profit", "net loss"]) and not net_profit_row:
             net_profit_row = idx
@@ -1061,7 +1078,6 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     else:
         add_item("Capital Efficiency", "3 Yr Sales CAGR", "N/A", 2, 5, "ℹ️ Info", "Sales CAGR data not reported")
 
-    # Corrected PAT CAGR Logic
     if p_cagr is not None:
         if p_cagr >= 12:
             add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 5, 5, "🟢 Pass", "Strong profit expansion (> 12%)")
@@ -1248,7 +1264,7 @@ sidebar.title("EU QUICK FUNDA CHECK")
 sidebar.divider()
 
 with sidebar.form("audit_form"):
-    ticker_input = st.text_input("Enter NSE Ticker", value="UJJIVANSFB").upper()
+    ticker_input = st.text_input("Enter NSE Ticker", value="HDFC").upper()
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
 
 if ticker_input:
