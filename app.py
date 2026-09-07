@@ -1057,19 +1057,16 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             add_item("Sector-Specific (BFSI)", "Price to Book (P/B)", "1.5x", 4, 5, "🟢 Pass", "Standard valuation")
 
         # 4. Return on Assets (ROA)
-        roa = safe_float(m.get("ROA"), safe_float(m.get("Return on assets")))
-        if roa is None:
-            # Calculate from Annual Net Profit & Total Assets
-            for idx_p in m["df_pl"].index:
-                if "net profit" in str(idx_p).lower():
-                    for idx_b in m["df_bs"].index:
-                        if "total assets" in str(idx_b).lower():
-                            np_l = safe_float(m["df_pl"].loc[idx_p].iloc[-1])
-                            ta_l = safe_float(m["df_bs"].loc[idx_b].iloc[-1])
-                            if np_l and ta_l and ta_l > 0:
-                                roa = round((np_l / ta_l) * 100, 2)
-                            break
-                    break
+       roa = safe_float(m.get("ROA"), safe_float(m.get("Return on assets")))
+        if roa is None and not m.get("df_pl", pd.DataFrame()).empty and not m.get("df_bs", pd.DataFrame()).empty:
+            np_vals = [safe_float(v) for v in m["df_pl"].loc[idx_p].values if safe_float(v) is not None] if any("net profit" in str(i).lower() for i in m["df_pl"].index) else []
+            ta_vals = [safe_float(v) for v in m["df_bs"].loc[idx_b].values if safe_float(v) is not None] if any("total assets" in str(i).lower() for i in m["df_bs"].index) else []
+            
+            # Extract last valid element without crashing
+            np_l = np_vals[-1] if np_vals else None
+            ta_l = ta_vals[-1] if ta_vals else None
+            if np_l is not None and ta_l is not None and ta_l > 0:
+                roa = round((np_l / ta_l) * 100, 2)
 
         if roa is not None and roa > 0:
             if roa >= 1.5:
