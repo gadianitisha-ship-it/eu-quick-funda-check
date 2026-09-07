@@ -435,25 +435,36 @@ def fetch_nse_delivery_data(ticker: str):
         pass
     return None
 
-# ----------------- SCRAPER WITH AUTOMATIC REDIRECT & STANDALONE FALLBACK -----------------
+# ----------------- CLEAN BULLETPROOF SCRAPER -----------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def scrape_full_screener(symbol: str):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
-    
-    # Try consolidated first, but immediately fall back to standalone
-    url = f"https://www.screener.in/company/{symbol}/consolidated/"
-    res = session.get(url, timeout=6.0, allow_redirects=True)
-    soup = BeautifulSoup(res.text, 'html.parser')
-    
-    # Test if financial tables exist on the page; if not, fetch standalone
-    test_table = soup.find('section', {'id': 'profit-loss'}) or soup.find('section', {'id': 'income-statement'})
-    if not test_table:
-        url = f"https://www.screener.in/company/{symbol}/"
-        res = session.get(url, timeout=6.0, allow_redirects=True)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
+
+    soup = None
+    # 1. Try direct standalone first (canonical for banks/new listings like UJJIVANSFB)
+    # 2. Then try consolidated (for groups like TCS, INFY, etc.)
+    urls_to_try = [
+        f"https://www.screener.in/company/{symbol}/",
+        f"https://www.screener.in/company/{symbol}/consolidated/"
+    ]
+
+    for u in urls_to_try:
+        try:
+            r = session.get(u, timeout=5.0, allow_redirects=True)
+            if r.status_code == 200 and len(r.text) > 1000:
+                temp_soup = BeautifulSoup(r.text, 'html.parser')
+                # Verify that actual statement tables exist
+                if temp_soup.find('section', {'id': re.compile(r'profit-loss|income|quarters|quarterly|balance-sheet', re.I)}):
+                    soup = temp_soup
+                    break
+        except Exception:
+            continue
+
+    if not soup:
+        return None
+
     data = {"Symbol": symbol}
     
     title_tag = soup.find('h1')
@@ -469,7 +480,7 @@ def scrape_full_screener(symbol: str):
     data["Archetype"] = resolve_sector_archetype(sector_txt, data["Company Name"])
     data["is_bfsi"] = (data["Archetype"] == "BFSI")
 
-    company_id_match = re.search(r'data-company-id="(\d+)"', res.text) or re.search(r'/api/company/(\d+)/', res.text)
+    company_id_match = re.search(r'data-company-id="(\d+)"', str(soup)) or re.search(r'/api/company/(\d+)/', str(soup))
     company_id = company_id_match.group(1) if company_id_match else None
     data["Company_ID"] = company_id
 
@@ -521,7 +532,7 @@ def scrape_full_screener(symbol: str):
     data["live_announcements"] = documents_list[:6]
     data["live_concalls"] = concall_list[:6]
 
-    # Quick Top Ratios (Supports both ul#top-ratios and div.company-ratios)
+    # Quick Top Ratios (Supports ul#top-ratios and div.company-ratios)
     top_ratios = soup.find('ul', {'id': 'top-ratios'}) or soup.find('div', class_='company-ratios')
     if top_ratios:
         for li in top_ratios.find_all(['li', 'div']):
@@ -533,17 +544,16 @@ def scrape_full_screener(symbol: str):
                 parsed = safe_float(val_clean)
                 data[name] = parsed if parsed is not None else val_clean
 
-    def extract_full_table(section_ids):
-        if isinstance(section_ids, str):
-            section_ids = [section_ids]
-        sec = None
-        for s_id in section_ids:
-            sec = soup.find('section', {'id': s_id})
+    def extract_full_table(section_patterns):
+        if isinstance(section_patterns, str):
+            section_patterns = [section_patterns]
+        table = None
+        for pat in section_patterns:
+            sec = soup.find('section', {'id': re.compile(pat, re.I)})
             if sec:
-                break
-        if not sec:
-            return pd.DataFrame()
-        table = sec.find('table')
+                table = sec.find('table')
+                if table:
+                    break
         if not table:
             return pd.DataFrame()
         
@@ -569,10 +579,10 @@ def scrape_full_screener(symbol: str):
             df.index = df.index.map(lambda x: str(x).replace('+', '').strip())
         return df
 
-    data["df_pl"] = extract_full_table(["profit-loss", "income-statement"])
+    data["df_pl"] = extract_full_table(["profit-loss", "income"])
     data["df_bs"] = extract_full_table(["balance-sheet"])
     data["df_cf"] = extract_full_table(["cash-flow", "cash-flows"])
-    data["df_quarters"] = extract_full_table(["quarters", "quarterly-results"])
+    data["df_quarters"] = extract_full_table(["quarters", "quarterly"])
     data["df_ratios"] = extract_full_table(["ratios"])
     data["df_shareholding"] = extract_full_table(["shareholding"])
 
@@ -614,7 +624,7 @@ def scrape_full_screener(symbol: str):
     data["Net_NPA_Period"] = nnpa_period if nnpa_period else "Latest"
 
     # IT Employee Cost
-    sales_ser = get_row_series(data["df_pl"], "Sales") or get_row_series(data["df_pl"], "Revenue")
+    sales_ser = get_row_series(data["df_pl"], "Sales") or get_row_series(data["df_pl"], "Revenue") or get_row_series(data["df_pl"], "Interest Earned")
     emp_ser = get_row_series(data["df_pl"], "Employee Cost")
     if not emp_ser:
         emp_ser = get_row_series(data["df_pl"], "Expenses")
@@ -1256,7 +1266,7 @@ if ticker_input:
         live_news = fetch_live_news(ticker_input)
         nse_delivery = fetch_nse_delivery_data(ticker_input)
         
-    if not d or (d.get("df_pl", pd.DataFrame()).empty and d.get("df_quarters", pd.DataFrame()).empty):
+    if not d:
         st.error(f"Unable to retrieve verified financials for '{ticker_input}'. Please check the symbol or verify on Screener.in.")
     else:
         final_score, checklist_df, cat_scores = evaluate_exact_checklist(d, pe_stats)
