@@ -39,10 +39,7 @@ def safe_float(val, default=None):
     return default
 
 def format_inr(val):
-    """
-    Formats integers and float values into the standard Indian numbering system:
-    100000 -> 1,00,000
-    """
+    """Formats integers and float values into the standard Indian numbering system (1,00,000)."""
     if val is None or val == "" or str(val).strip() in ["-", "None", "nan", "N/A"]:
         return "-"
     num = safe_float(val)
@@ -52,7 +49,6 @@ def format_inr(val):
     is_neg = num < 0
     num = abs(num)
     
-    # Check if number is practically an integer (e.g. 1500.0)
     if num == int(num):
         s = str(int(num))
         dec = ""
@@ -98,7 +94,7 @@ def compute_series_cagr(series, years):
     except Exception:
         return "N/A", start_val, end_val
 
-# ----------------- TRUE HISTORICAL P/E ENGINE (AUDITED BASIS) -----------------
+# ----------------- TRUE HISTORICAL P/E ENGINE -----------------
 def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, curr_pe, face_val):
     if df_pl.empty or not cmp_val or cmp_val <= 0:
         return pd.DataFrame(), {}
@@ -129,7 +125,6 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     r_1 = (1 + cagr_1 / 100.0) if cagr_1 is not None else 1.10
 
     total_cols = len(cols)
-    fv = safe_float(face_val, 10.0)
 
     for idx_yr, c in enumerate(cols):
         eps_val = safe_float(df_pl.loc[eps_row, c])
@@ -137,14 +132,12 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
         
         years_back = (total_cols - 1) - idx_yr
         
-        # Check if the fiscal year has ended in the past (e.g. Mar 2026) vs currently active TTM
         if years_back == 0:
-            # Derive historical March year-end price using 1-Year price trajectory
             if r_1 and r_1 > 0:
-                hist_price = round(cmp_val / (r_1 ** 0.45), 1)  # Adjusts for the elapsed months since March 31
+                hist_price = round(cmp_val / (r_1 ** 0.45), 1)
             else:
                 hist_price = cmp_val
-            hist_pe = round(hist_price / eps_val, 1) if (eps_val and eps_val > 0) else safe_float(curr_pe)
+            hist_pe = round(hist_price / eps_val, 1) if (eps_val and eps_val > 0) else None
         elif years_back == 1 and r_1 > 0:
             hist_price = round(cmp_val / r_1, 1)
             hist_pe = round(hist_price / eps_val, 1) if (eps_val and eps_val > 0) else None
@@ -175,9 +168,9 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
         med_10 = round(float(np.median(valid_pes)), 1)
         mean_pe = round(float(np.mean(valid_pes)), 1)
         std_pe = round(float(np.std(valid_pes)), 1)
-        curr_p_val = valid_pes[-1]
         
-        diff_5y = round(((curr_p_val - med_5) / med_5) * 100, 1) if med_5 > 0 else 0.0
+        live_pe_val = safe_float(curr_pe, valid_pes[-1])
+        diff_5y = round(((live_pe_val - med_5) / med_5) * 100, 1) if med_5 > 0 else 0.0
         
         if diff_5y > 20:
             zone_desc = f"🔴 Premium / Overvalued ({diff_5y}% above 5Y Median)"
@@ -187,7 +180,7 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
             zone_desc = f"🟡 Fair Value Zone (Trading within ±15% of 5Y Median)"
 
         pe_stats = {
-            "Current_PE": curr_p_val,
+            "Current_PE": live_pe_val,
             "3Y_Median": med_3,
             "5Y_Median": med_5,
             "10Y_Median": med_10,
@@ -200,7 +193,7 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
 
     return df_hist, {}
 
-# ----------------- DUPONT 3-STAGE WITH NEGATIVE EQUITY GUARD -----------------
+# ----------------- DUPONT 3-STAGE ENGINE -----------------
 def compute_dupont_analysis(df_pl, df_bs):
     if df_pl.empty or df_bs.empty:
         return pd.DataFrame()
@@ -392,7 +385,7 @@ def evaluate_forensic_red_flags(d: dict):
 
     return df_flags, red_count, warn_count
 
-# ----------------- CACHED LIVE FEEDS (WITH STRICT 1.5S TIMEOUT) -----------------
+# ----------------- CACHED LIVE FEEDS -----------------
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_live_news(ticker: str):
     news_items = []
@@ -412,9 +405,6 @@ def fetch_live_news(ticker: str):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_nse_delivery_data(ticker: str):
-    """
-    NSE scraper with strict 1.5s timeout. Fails immediately and silently on Cloud/AWS IP blocks.
-    """
     try:
         s = requests.Session()
         s.headers.update(HEADERS)
@@ -559,6 +549,34 @@ def scrape_full_screener(symbol: str):
     data["df_cf"] = extract_full_table("cash-flow")
     data["df_shareholding"] = extract_full_table("shareholding")
 
+    # Fetch all detailed schedules across P&L, Balance Sheet, and Cash Flow
+    data["schedules"] = {}
+    if company_id:
+        try:
+            sched_url = f"https://www.screener.in/api/company/{company_id}/schedules/"
+            s_res = session.get(sched_url, headers=HEADERS, timeout=4.5)
+            if s_res.status_code == 200:
+                sched_soup = BeautifulSoup(s_res.text, 'html.parser')
+                for table in sched_soup.find_all('table'):
+                    th_title = table.find('th')
+                    if th_title:
+                        raw_title = th_title.text.strip()
+                        clean_title = re.sub(r'^[+\-\s]+', '', raw_title)
+                        s_headers = [h.text.strip() for h in table.find_all('th')[1:] if h.text.strip()]
+                        s_rows = []
+                        for tr in table.find_all('tr')[1:]:
+                            tds = tr.find_all(['td', 'th'])
+                            if tds:
+                                s_rows.append([c.text.strip().replace(',', '') for c in tds])
+                        if s_rows:
+                            df_sched = pd.DataFrame(s_rows)
+                            if df_sched.shape[1] == len(s_headers) + 1:
+                                df_sched.columns = ["Item"] + s_headers
+                                df_sched = df_sched.set_index("Item")
+                                data["schedules"][clean_title] = df_sched
+        except Exception:
+            pass
+
     def get_row_series(df, row_name):
         if df.empty:
             return []
@@ -643,7 +661,6 @@ def scrape_full_screener(symbol: str):
         "Latest": f"{format_inr(net_worth_series[-1])} Cr" if net_worth_series else "N/A"
     }
 
-    # Time-Matched CFO / OP Ratio
     common_years = [
         col for col in data["df_cf"].columns 
         if col in data["df_pl"].columns and col.lower() != 'ttm'
@@ -676,7 +693,6 @@ def scrape_full_screener(symbol: str):
     else:
         data["Price_to_CashFlow"] = None
 
-    # Data Integrity Tests
     data["audit_checks"] = []
     tot_assets = get_row_series(data["df_bs"], "Total Assets")
     tot_liab = get_row_series(data["df_bs"], "Total Liabilities")
@@ -703,7 +719,6 @@ def scrape_full_screener(symbol: str):
             "Result": "🟢 Audited Period Matched"
         })
 
-    # Shareholding Trends
     promoter_vals = get_row_series(data["df_shareholding"], "Promoters")
     fii_vals = get_row_series(data["df_shareholding"], "FIIs")
     dii_vals = get_row_series(data["df_shareholding"], "DIIs")
@@ -971,7 +986,6 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     prom_hist = format_hist(m.get("Promoter_History", []))
     total_inst = safe_float(m.get("FII_Latest"), 0.0) + safe_float(m.get("DII_Latest"), 0.0)
 
-    # Professionally Managed Entity Logic
     if prom_val == 0.0 and total_inst >= 50.0:
         add_item(
             "Ownership & Governance",
@@ -1049,10 +1063,13 @@ def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_tab
             d["df_peers"].to_excel(writer, sheet_name='Peers Comparison', index=False)
         if d.get("audit_checks"):
             pd.DataFrame(d["audit_checks"]).to_excel(writer, sheet_name='Integrity Audit', index=False)
+        # Export all granular schedules
+        for title, s_df in d.get("schedules", {}).items():
+            sheet_title = re.sub(r'[\\/*?:\[\]]', '_', title)[:30]
+            s_df.to_excel(writer, sheet_name=sheet_title)
     return output.getvalue()
 
 # ----------------- UI APPLICATION -----------------
-# Top Banner Branding
 if os.path.exists(LOGO_FILE):
     head_col1, head_col2 = st.columns([0.08, 0.92])
     with head_col1:
@@ -1064,7 +1081,6 @@ else:
 
 st.caption("Institutional fundamental diagnostic terminal with audited historical multiples, DuPont decomposition, forensic detection, and real-time reconciliation.")
 
-# Sidebar Branding with Form Guard
 sidebar = st.sidebar
 if os.path.exists(LOGO_FILE):
     sidebar.image(LOGO_FILE, width=120)
@@ -1204,11 +1220,10 @@ if ticker_input:
             styled = display_table.style.map(style_status, subset=['Status'])
             st.dataframe(styled, use_container_width=True, hide_index=True)
 
-        # TAB 2: CLEAN COMPOUNDED GROWTH
+        # TAB 2: COMPOUNDED GROWTH
         with tab_cagr:
             st.markdown("### 📊 Comprehensive 8-Metric Compounded Matrix")
             st.caption("Native and computed compounded growth rates across financial timeframes.")
-            
             st.dataframe(extended_matrix_df, hide_index=True, use_container_width=True)
 
             st.divider()
@@ -1227,37 +1242,69 @@ if ticker_input:
                 st.markdown("##### 🏛️ Net Worth / Equity CAGR")
                 st.dataframe(pd.DataFrame(list(d["NetWorth_CAGR"].items()), columns=["Period", "Net Worth"]), hide_index=True, use_container_width=True)
 
-        # TAB 3: FINANCIAL STATEMENTS (WITH INDIAN NUMBER NOTATION FORMATTING)
+        # TAB 3: FINANCIAL STATEMENTS WITH MULTI-LEVEL EXPANDABLE SCHEDULES
         with tab_financials:
             st.markdown("### 📑 Primary Financial Statements (₹ Cr)")
-            st.caption("All figures formatted with Indian numbering notation (1,00,000).")
-            
+            st.caption("All figures formatted with Indian numbering notation (1,00,000). Detailed drill-downs available below each statement.")
+
+            # Classification helper for schedules
+            pl_keys = ["Sales", "Expenses", "Other Income"]
+            bs_keys = ["Share Capital", "Reserves", "Borrowings", "Other Liabilities", "Fixed Assets", "CWIP", "Investments", "Other Assets"]
+            cf_keys = ["Operating Activity", "Investing Activity", "Financing Activity"]
+
+            # 1. P&L Section
             if not d["df_pl"].empty:
                 st.markdown("#### 1. Profit & Loss Statement (₹ Cr)")
                 st.dataframe(format_financial_df(d["df_pl"]), use_container_width=True)
+
+                pl_schedules = {k: v for k, v in d.get("schedules", {}).items() if any(pk.lower() in k.lower() for pk in pl_keys)}
+                if pl_schedules:
+                    with st.expander("🔍 Drill-Down Sub-Ledgers: Profit & Loss (Sales, Expenses, Other Income)"):
+                        for sched_title, sched_df in pl_schedules.items():
+                            st.markdown(f"**{sched_title}**")
+                            st.dataframe(format_financial_df(sched_df), use_container_width=True)
+                            st.write("")
             else:
                 st.info("Profit & Loss statement unavailable.")
 
             st.divider()
 
+            # 2. Balance Sheet Section
             if not d["df_bs"].empty:
                 st.markdown("#### 2. Balance Sheet (₹ Cr)")
                 st.dataframe(format_financial_df(d["df_bs"]), use_container_width=True)
+
+                bs_schedules = {k: v for k, v in d.get("schedules", {}).items() if any(bk.lower() in k.lower() for bk in bs_keys)}
+                if bs_schedules:
+                    with st.expander("🔍 Drill-Down Sub-Ledgers: Balance Sheet (Assets, Liabilities, Borrowings)"):
+                        for sched_title, sched_df in bs_schedules.items():
+                            st.markdown(f"**{sched_title}**")
+                            st.dataframe(format_financial_df(sched_df), use_container_width=True)
+                            st.write("")
             else:
                 st.info("Balance Sheet statement unavailable.")
 
             st.divider()
 
+            # 3. Cash Flow Section
             if not d["df_cf"].empty:
                 st.markdown("#### 3. Cash Flow Statement (₹ Cr)")
                 st.dataframe(format_financial_df(d["df_cf"]), use_container_width=True)
+
+                cf_schedules = {k: v for k, v in d.get("schedules", {}).items() if any(ck.lower() in k.lower() for ck in cf_keys)}
+                if cf_schedules:
+                    with st.expander("🔍 Drill-Down Sub-Ledgers: Cash Flow (Operating, Investing, Financing Details)"):
+                        for sched_title, sched_df in cf_schedules.items():
+                            st.markdown(f"**{sched_title}**")
+                            st.dataframe(format_financial_df(sched_df), use_container_width=True)
+                            st.write("")
             else:
                 st.info("Cash Flow statement unavailable.")
 
-        # TAB 4: DUPONT 3-STAGE WITH DEFENSIVE PROTECTION
+        # TAB 4: DUPONT 3-STAGE
         with tab_dupont:
             st.markdown("### 🔬 DuPont 3-Stage Decomposition")
-            st.caption("Deconstructs Return on Equity into Profit Margin (Operating Efficiency), Asset Turnover (Capital Efficiency), and Equity Multiplier (Financial Leverage).")
+            st.caption("Deconstructs Return on Equity into Profit Margin, Asset Turnover, and Financial Leverage.")
 
             if not df_dupont.empty:
                 dp_latest = df_dupont.iloc[-1]
@@ -1270,7 +1317,7 @@ if ticker_input:
                 st.markdown("#### 📋 10-Year DuPont Decomposition Table")
                 st.dataframe(df_dupont, hide_index=True, use_container_width=True)
             else:
-                st.info("DuPont decomposition requires complete multi-year P&L and Balance Sheet records.")
+                st.info("DuPont decomposition requires complete multi-year records.")
 
         # TAB 5: HISTORICAL P/E BANDS
         with tab_pe_bands:
@@ -1279,7 +1326,7 @@ if ticker_input:
 
             if pe_stats:
                 b1, b2, b3, b4 = st.columns(4)
-                b1.metric(label="Current P/E", value=f"{pe_stats.get('Current_PE', d.get('Stock P/E', 'N/A'))}")
+                b1.metric(label="Live Market P/E (TTM)", value=f"{d.get('Stock P/E', pe_stats.get('Current_PE', 'N/A'))}")
                 b2.metric(label="3Y Median P/E", value=f"{pe_stats.get('3Y_Median', 'N/A')}")
                 b3.metric(label="5Y Median P/E", value=f"{pe_stats.get('5Y_Median', 'N/A')}")
                 b4.metric(label="10Y Median P/E", value=f"{pe_stats.get('10Y_Median', 'N/A')}")
@@ -1305,7 +1352,7 @@ if ticker_input:
         # TAB 6: FORENSIC RED FLAGS
         with tab_forensics:
             st.markdown("### 🚩 Forensic Accounting & Earnings Quality Screen")
-            st.caption("Automates institutional forensic checks (accrual anomalies, earnings decoupling, cumulative cash realization, and promoter leverage).")
+            st.caption("Automates institutional forensic checks (accruals, cash realization, and promoter leverage).")
 
             fc1, fc2, fc3 = st.columns(3)
             fc1.metric("Critical Red Flags", f"{red_flags_cnt}", delta="Clean" if red_flags_cnt == 0 else "High Risk", delta_color="inverse")
