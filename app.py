@@ -105,48 +105,42 @@ def resolve_sector_archetype(sector_desc: str, company_name: str) -> str:
         return "PHARMA"
     return "GENERAL"
 
-# ----------------- REAL HISTORICAL PRICE & P/E ENGINE (SPLIT UNADJUSTED) -----------------
+# ----------------- REAL HISTORICAL PRICE & P/E ENGINE (NSE/BSE FALLBACK) -----------------
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_real_historical_prices(symbol: str):
     price_map = {}
     if not symbol:
         return price_map
-    try:
-        ticker = f"{symbol.strip().upper()}.NS"
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="max", auto_adjust=False)
-        if hist.empty:
-            ticker = f"{symbol.strip().upper()}.BO"
+        
+    # Attempt NSE first, fallback to BSE archive (vital for delisted/merged entities like HDFC)
+    for exchange in [".NS", ".BO"]:
+        try:
+            ticker = f"{symbol.strip().upper()}{exchange}"
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="max", auto_adjust=False)
+            hist = stock.history(period="max")
             
-        if not hist.empty:
+            if hist.empty:
+                continue
+                
             hist.index = pd.to_datetime(hist.index)
             if hist.index.tz is not None:
                 hist.index = hist.index.tz_localize(None)
                 
-            splits = stock.splits
-            if not splits.empty and splits.index.tz is not None:
-                splits.index = splits.index.tz_localize(None)
-                
             curr_year = datetime.now().year
-            for year in range(2012, curr_year + 1):
+            temp_map = {}
+            for year in range(2010, curr_year + 1):
                 march_data = hist[(hist.index.year == year) & (hist.index.month == 3)]
                 if not march_data.empty:
                     last_row = march_data.iloc[-1]
-                    date_val = last_row.name
-                    adj_close = float(last_row['Close'])
-                    
-                    unadj_price = adj_close
-                    if not splits.empty:
-                        future_splits = splits[splits.index > date_val]
-                        if not future_splits.empty:
-                            split_factor = future_splits.prod()
-                            unadj_price = adj_close * split_factor
-                            
-                    price_map[f"Mar {year}"] = round(unadj_price, 1)
-    except Exception:
-        pass
+                    # Direct aligned fetch (Yahoo Close is split-adjusted, matching Screener's retro-adjusted EPS)
+                    temp_map[f"Mar {year}"] = round(float(last_row['Close']), 1)
+            
+            if len(temp_map) > 0:
+                price_map = temp_map
+                break # Successfully populated, stop fallback search
+        except Exception:
+            continue
+            
     return price_map
 
 def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, curr_pe, face_val, symbol=""):
@@ -194,6 +188,7 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     df_hist = pd.DataFrame(records)
     valid_pes = [r["Historical Year-End P/E"] for r in records if isinstance(r["Historical Year-End P/E"], (int, float))]
     
+    # Filter out extreme outliers (> 100x P/E) caused by near-zero EPS for reliable medians
     filtered_pes = [p for p in valid_pes if isinstance(p, (int, float)) and 0 < p <= 100]
     
     if filtered_pes:
@@ -1078,6 +1073,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     else:
         add_item("Capital Efficiency", "3 Yr Sales CAGR", "N/A", 2, 5, "ℹ️ Info", "Sales CAGR data not reported")
 
+    # Corrected PAT CAGR Logic
     if p_cagr is not None:
         if p_cagr >= 12:
             add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 5, 5, "🟢 Pass", "Strong profit expansion (> 12%)")
@@ -1341,7 +1337,7 @@ if ticker_input:
         if red_flags_cnt >= 2:
             st.error(f"**CRITICAL FORENSIC ALERT:** {red_flags_cnt} High-Risk accounting or cash-flow red flags detected.")
         elif final_score >= 75:
-            st.success(f"**FINAL VERDICT: STRONG PASS ({final_score}/100)** — Sound fundamentals across balance sheet, cash conversion, and capital returns.")
+            st.success(f"**FINAL Verdict: STRONG PASS ({final_score}/100)** — Sound fundamentals across balance sheet, cash conversion, and capital returns.")
         elif final_score >= 55:
             st.warning(f"**FINAL VERDICT: CONDITIONAL / WATCHLIST ({final_score}/100)** — Moderate profile. Review individual caution flags before entry.")
         else:
