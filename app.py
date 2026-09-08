@@ -458,10 +458,12 @@ def scrape_full_screener(symbol: str):
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    soup = None
+   soup = None
+    # 1. ALWAYS try Consolidated first for accurate valuation
+    # 2. Fallback to Standalone ONLY if Consolidated 404s (e.g., UJJIVANSFB)
     urls_to_try = [
-        f"https://www.screener.in/company/{symbol}/",
-        f"https://www.screener.in/company/{symbol}/consolidated/"
+        f"https://www.screener.in/company/{symbol}/consolidated/",
+        f"https://www.screener.in/company/{symbol}/"
     ]
 
     for u in urls_to_try:
