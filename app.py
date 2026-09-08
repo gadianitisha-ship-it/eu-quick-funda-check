@@ -741,7 +741,7 @@ def scrape_full_screener(symbol: str):
         if col in data["df_pl"].columns and col.lower() != 'ttm'
     ]
 
-    if common_years and not data["is_bfsi"]:
+    if common_years:
         latest_yr = common_years[-1]
         cfo_matched = get_row_series(data["df_cf"][[latest_yr]], "Cash from Operating")
         op_matched = get_row_series(data["df_pl"][[latest_yr]], "Operating Profit")
@@ -758,7 +758,7 @@ def scrape_full_screener(symbol: str):
     else:
         data["CFO_OP_Ratio"] = None
         data["Latest_CFO"] = None
-        data["CFO_OP_Period"] = "BFSI Waived"
+        data["CFO_OP_Period"] = "N/A"
 
     mcap = safe_float(data.get("Market Cap"), 0.0)
     if data.get("Latest_CFO") and data["Latest_CFO"] > 0 and mcap > 0:
@@ -890,10 +890,11 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     else:
         add_item("Solvency & Scale", "Market Cap", f"₹{format_inr(mcap)} Cr", 1, 10, "🔴 Caution", "Below 1000 cr generally avoidable, until compelling story exists")
 
+    de = safe_float(m.get("Calculated_DE"), 0.0)
     if m.get("is_bfsi"):
-        add_item("Solvency & Scale", "Debt to Equity (Audited)", "BFSI Exempt", 0, 0, "ℹ️ Info", "Exempt for BFSI")
+        de_str = "Negative Net Worth" if de >= 900 else f"{de}"
+        add_item("Solvency & Scale", "Debt to Equity (Audited)", de_str, 0, 0, "ℹ️ Info", "Exempt for BFSI (High leverage is standard)")
     else:
-        de = safe_float(m.get("Calculated_DE"), 0.0)
         if de >= 900:
             add_item("Solvency & Scale", "Debt to Equity (Audited)", "Negative Net Worth", 0, 15, "🔴 Caution", "Distress: Net worth wiped out by debt")
         elif de <= 0.3:
@@ -903,10 +904,11 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Solvency & Scale", "Debt to Equity (Audited)", f"{de}", 0, 15, "🔴 Caution", "If more than 0.8 do thorough checking (Except BFSI)")
 
+    cr = safe_float(m.get("Current_Ratio"))
     if m.get("is_bfsi"):
-        add_item("Solvency & Scale", "Current Ratio", "BFSI Waived", 0, 0, "ℹ️ Info", "Waived for financial models")
+        cr_str = f"{cr}" if cr is not None else "N/A"
+        add_item("Solvency & Scale", "Current Ratio", cr_str, 0, 0, "ℹ️ Info", "Waived for financial models")
     else:
-        cr = safe_float(m.get("Current_Ratio"))
         if cr is not None:
             if cr > 1.2:
                 add_item("Solvency & Scale", "Current Ratio", f"{cr}", 10, 10, "🟢 Pass", "Comfortable liquidity buffer (> 1.2)")
@@ -917,10 +919,11 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Solvency & Scale", "Current Ratio", "Data Unavailable", 0, 10, "ℹ️ Info", "Waived or unavailable")
 
+    ic = safe_float(m.get("Interest_Coverage"))
     if m.get("is_bfsi"):
-        add_item("Solvency & Scale", "Interest Coverage", "BFSI Exempt", 0, 0, "ℹ️ Info", "Waived for financial models")
+        ic_str = f"{ic}x" if ic is not None else "N/A"
+        add_item("Solvency & Scale", "Interest Coverage", ic_str, 0, 0, "ℹ️ Info", "Waived for financial models")
     else:
-        ic = safe_float(m.get("Interest_Coverage"))
         if ic is not None:
             if ic >= 4.0:
                 add_item("Solvency & Scale", "Interest Coverage", f"{ic}x", 5, 5, "🟢 Pass", "Comfortable debt serviceability (> 4x)")
@@ -962,10 +965,11 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 2, 5, "🟡 Caution", "Elevated relative to historical baseline")
 
+    p_cf = safe_float(m.get("Price_to_CashFlow"))
     if m.get("is_bfsi"):
-        add_item("Valuation", "Price to Cash Flow (Audited)", "BFSI Exempt", 0, 0, "ℹ️ Info", "Cash flow multiples waived for financial institutions")
+        pcf_str = f"{p_cf}" if p_cf is not None else "Negative CFO / NA"
+        add_item("Valuation", "Price to Cash Flow (Audited)", pcf_str, 0, 0, "ℹ️ Info", "Waived for financial models (Advances count as outflows)")
     else:
-        p_cf = safe_float(m.get("Price_to_CashFlow"))
         if p_cf is not None:
             if p_cf <= 20:
                 add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 5, 5, "🟢 Pass", "Healthy cash multiple")
@@ -977,12 +981,14 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO / NA", 0, 5, "🔴 Caution", "Negative cash flow or data unavailable")
 
     # 5. CAPITAL EFFICIENCY & CONVERSION
+    cfo_op = safe_float(m.get("CFO_OP_Ratio"))
+    cfo_period = m.get("CFO_OP_Period", "")
+    period_label = f" [{cfo_period}]" if cfo_period and cfo_period != "N/A" else ""
+    
     if m.get("is_bfsi"):
-        add_item("Capital Efficiency", "CFO / OP (Audited)", "BFSI Exempt", 0, 0, "ℹ️ Info", "Operating cash conversion waived for financial institutions")
+        cfo_op_str = f"{cfo_op}%{period_label}" if cfo_op is not None else "Negative CFO / NA"
+        add_item("Capital Efficiency", "CFO / OP (Audited)", cfo_op_str, 0, 0, "ℹ️ Info", "Operating cash conversion waived for financial institutions")
     else:
-        cfo_op = safe_float(m.get("CFO_OP_Ratio"))
-        cfo_period = m.get("CFO_OP_Period", "")
-        period_label = f" [{cfo_period}]" if cfo_period else ""
         if cfo_op is not None:
             if cfo_op >= 100:
                 add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 15, 15, "🟢 Pass", "Comfortable range: If => 100 very good")
@@ -1016,7 +1022,13 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         add_item("Capital Efficiency", "3 Yrs Avg ROE Check", "N/A", 3, 5, "ℹ️ Info", "Historical average unavailable")
 
     if m.get("is_bfsi"):
-        add_item("Capital Efficiency", "ROE vs ROCE Integrity", "BFSI Exempt", 0, 0, "ℹ️ Info", "ROCE waived for financial models")
+        if roe is not None and roce is not None:
+            roce_str = f"ROE: {roe}% | ROCE: {roce}%"
+        elif roce is not None:
+            roce_str = f"ROCE: {roce}%"
+        else:
+            roce_str = "N/A"
+        add_item("Capital Efficiency", "ROE vs ROCE Integrity", roce_str, 0, 0, "ℹ️ Info", "ROCE waived for financial models")
     else:
         if roe is not None and roce is not None:
             if (roe - roce) > 10:
