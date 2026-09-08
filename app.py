@@ -185,7 +185,6 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
 
     df_hist = pd.DataFrame(records)
     valid_pes = [r["Historical Year-End P/E"] for r in records if isinstance(r["Historical Year-End P/E"], (int, float))]
-    
     filtered_pes = [p for p in valid_pes if isinstance(p, (int, float)) and 0 < p <= 100]
     
     if filtered_pes:
@@ -542,7 +541,7 @@ def scrape_full_screener(symbol: str):
     data["live_announcements"] = documents_list[:6]
     data["live_concalls"] = concall_list[:6]
 
-    # Quick Top Ratios
+    # Quick Top Ratios (Fixed to preserve slash-separated values like High / Low)
     top_ratios = soup.find('ul', {'id': 'top-ratios'}) or soup.find('div', class_='company-ratios')
     if top_ratios:
         for li in top_ratios.find_all(['li', 'div']):
@@ -551,8 +550,11 @@ def scrape_full_screener(symbol: str):
             if name_el and val_el:
                 name = name_el.text.strip()
                 val_clean = val_el.text.replace(',', '').replace('₹', '').strip()
-                parsed = safe_float(val_clean)
-                data[name] = parsed if parsed is not None else val_clean
+                if "/" in val_clean:
+                    data[name] = val_clean
+                else:
+                    parsed = safe_float(val_clean)
+                    data[name] = parsed if parsed is not None else val_clean
 
     def extract_full_table(section_patterns):
         if isinstance(section_patterns, str):
@@ -745,11 +747,9 @@ def scrape_full_screener(symbol: str):
         op_matched = get_row_series(data["df_pl"][[latest_yr]], "Operating Profit")
         
         if cfo_matched and op_matched and op_matched[0] != 0:
-            cfo_val = cfo_matched[0]
-            op_val = op_matched[0]
-            data["CFO_OP_Ratio"] = round((cfo_val / op_val) * 100, 1)
-            data["Latest_CFO"] = cfo_val
-            data["Latest_OP_Annual"] = op_val
+            data["CFO_OP_Ratio"] = round((cfo_matched[0] / op_matched[0]) * 100, 1)
+            data["Latest_CFO"] = cfo_matched[0]
+            data["Latest_OP_Annual"] = op_matched[0]
             data["CFO_OP_Period"] = f"FY {latest_yr}"
         else:
             data["CFO_OP_Ratio"] = None
@@ -956,7 +956,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 2, 5, "🟡 Caution", "Elevated relative to historical baseline")
 
-   # Price to Cash Flow Fix
+    # Price to Cash Flow (Exempt for BFSI)
     if m.get("is_bfsi"):
         add_item("Valuation", "Price to Cash Flow (Audited)", "BFSI Exempt", 5, 5, "🟢 Pass", "Cash flow multiples waived for financial institutions")
     else:
@@ -971,7 +971,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO / NA", 0, 5, "🔴 Caution", "Negative cash flow or data unavailable")
 
-    # CFO / OP Fix
+    # 5. CAPITAL EFFICIENCY & CONVERSION (Single deduplicated check)
     if m.get("is_bfsi"):
         add_item("Capital Efficiency", "CFO / OP (Audited)", "BFSI Exempt", 15, 15, "🟢 Pass", "Operating cash conversion waived for financial institutions")
     else:
@@ -984,27 +984,11 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             elif cfo_op >= 60:
                 add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 12, 15, "🟢 Pass", "Comfortable range: 60-80%")
             elif cfo_op < 50:
-                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 2, 15, "🔴 Caution", "If < 50 be cautious")
+                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 2, 15, "🔴 Caution", "If < 50 be cautious (Operating profit not translating to cash)")
             else:
                 add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 8, 15, "🟡 Moderate", "Acceptable range (50-60%)")
         else:
             add_item("Capital Efficiency", "CFO / OP (Audited)", "Negative CFO / NA", 0, 15, "🔴 Caution", "Negative operating cash flow")
-
-    # 5. CAPITAL EFFICIENCY & CONVERSION
-    cfo_op = safe_float(m.get("CFO_OP_Ratio"))
-    cfo_period = m.get("CFO_OP_Period", "")
-    if cfo_op is not None and not m.get("is_bfsi"):
-        period_label = f" [{cfo_period}]" if cfo_period else ""
-        if cfo_op >= 100:
-            add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 15, 15, "🟢 Pass", "Comfortable range: If => 100 very good")
-        elif cfo_op >= 60:
-            add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 12, 15, "🟢 Pass", "Comfortable range: 60-80%")
-        elif cfo_op < 50:
-            add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 2, 15, "🔴 Caution", "If < 50 be cautious (Operating profit not translating to cash)")
-        else:
-            add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 8, 15, "🟡 Moderate", "Acceptable range (50-60%)")
-    else:
-        add_item("Capital Efficiency", "CFO / OP (Audited)", "BFSI Waived / Neg", 10, 15, "ℹ️ Info", "Exempt for BFSI or negative CFO")
 
     roe = safe_float(m.get("ROE"))
     avg_roe = safe_float(m.get("3Yr_Avg_ROE"))
@@ -1279,7 +1263,7 @@ sidebar.title("EU QUICK FUNDA CHECK")
 sidebar.divider()
 
 with sidebar.form("audit_form"):
-    ticker_input = st.text_input("Enter NSE Ticker", value="COFORGE").upper()
+    ticker_input = st.text_input("Enter NSE Ticker", value="HDFCBANK").upper()
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
 
 if ticker_input:
