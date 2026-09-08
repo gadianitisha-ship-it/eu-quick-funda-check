@@ -744,7 +744,7 @@ def scrape_full_screener(symbol: str):
     if common_years:
         latest_yr = common_years[-1]
         cfo_matched = get_row_series(data["df_cf"][[latest_yr]], "Cash from Operating")
-        op_matched = get_row_series(data["df_pl"][[latest_yr]], "Operating Profit")
+        op_matched = get_row_series(data["df_pl"][[latest_yr]], "Operating Profit") or get_row_series(data["df_pl"][[latest_yr]], "Financing Profit")
         
         if cfo_matched and op_matched and op_matched[0] != 0:
             data["CFO_OP_Ratio"] = round((cfo_matched[0] / op_matched[0]) * 100, 1)
@@ -761,8 +761,11 @@ def scrape_full_screener(symbol: str):
         data["CFO_OP_Period"] = "N/A"
 
     mcap = safe_float(data.get("Market Cap"), 0.0)
-    if data.get("Latest_CFO") and data["Latest_CFO"] > 0 and mcap > 0:
-        data["Price_to_CashFlow"] = round(mcap / data["Latest_CFO"], 2)
+    if data.get("Latest_CFO") and mcap > 0:
+        if data["Latest_CFO"] > 0:
+            data["Price_to_CashFlow"] = round(mcap / data["Latest_CFO"], 2)
+        else:
+            data["Price_to_CashFlow"] = None
     else:
         data["Price_to_CashFlow"] = None
 
@@ -965,11 +968,18 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 2, 5, "🟡 Caution", "Elevated relative to historical baseline")
 
-    p_cf = safe_float(m.get("Price_to_CashFlow"))
     if m.get("is_bfsi"):
-        pcf_str = f"{p_cf}" if p_cf is not None else "Negative CFO / NA"
+        p_cf = safe_float(m.get("Price_to_CashFlow"))
+        latest_cfo = safe_float(m.get("Latest_CFO"))
+        if p_cf is not None:
+            pcf_str = f"{p_cf}"
+        elif latest_cfo is not None and latest_cfo < 0:
+            pcf_str = f"Negative CFO (₹{format_inr(latest_cfo)} Cr)"
+        else:
+            pcf_str = "Data Unavailable"
         add_item("Valuation", "Price to Cash Flow (Audited)", pcf_str, 0, 0, "ℹ️ Info", "Waived for financial models (Advances count as outflows)")
     else:
+        p_cf = safe_float(m.get("Price_to_CashFlow"))
         if p_cf is not None:
             if p_cf <= 20:
                 add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 5, 5, "🟢 Pass", "Healthy cash multiple")
@@ -986,7 +996,13 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     period_label = f" [{cfo_period}]" if cfo_period and cfo_period != "N/A" else ""
     
     if m.get("is_bfsi"):
-        cfo_op_str = f"{cfo_op}%{period_label}" if cfo_op is not None else "Negative CFO / NA"
+        latest_cfo = safe_float(m.get("Latest_CFO"))
+        if cfo_op is not None:
+            cfo_op_str = f"{cfo_op}%{period_label}"
+        elif latest_cfo is not None and latest_cfo < 0:
+            cfo_op_str = f"Negative CFO (₹{format_inr(latest_cfo)} Cr)"
+        else:
+            cfo_op_str = "Data Unavailable"
         add_item("Capital Efficiency", "CFO / OP (Audited)", cfo_op_str, 0, 0, "ℹ️ Info", "Operating cash conversion waived for financial institutions")
     else:
         if cfo_op is not None:
