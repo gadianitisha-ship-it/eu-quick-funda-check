@@ -112,7 +112,6 @@ def fetch_real_historical_prices(symbol: str):
     if not symbol:
         return price_map
         
-    # Attempt NSE first, fallback to BSE archive (vital for delisted/merged entities like HDFC)
     for exchange in [".NS", ".BO"]:
         try:
             ticker = f"{symbol.strip().upper()}{exchange}"
@@ -132,12 +131,11 @@ def fetch_real_historical_prices(symbol: str):
                 march_data = hist[(hist.index.year == year) & (hist.index.month == 3)]
                 if not march_data.empty:
                     last_row = march_data.iloc[-1]
-                    # Direct aligned fetch (Yahoo Close is split-adjusted, matching Screener's retro-adjusted EPS)
                     temp_map[f"Mar {year}"] = round(float(last_row['Close']), 1)
             
             if len(temp_map) > 0:
                 price_map = temp_map
-                break # Successfully populated, stop fallback search
+                break
         except Exception:
             continue
             
@@ -188,7 +186,6 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     df_hist = pd.DataFrame(records)
     valid_pes = [r["Historical Year-End P/E"] for r in records if isinstance(r["Historical Year-End P/E"], (int, float))]
     
-    # Filter out extreme outliers (> 100x P/E) caused by near-zero EPS for reliable medians
     filtered_pes = [p for p in valid_pes if isinstance(p, (int, float)) and 0 < p <= 100]
     
     if filtered_pes:
@@ -451,16 +448,14 @@ def fetch_nse_delivery_data(ticker: str):
         pass
     return None
 
-# ----------------- CLEAN BULLETPROOF SCRAPER -----------------
+# ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def scrape_full_screener(symbol: str):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
 
-   soup = None
-    # 1. ALWAYS try Consolidated first for accurate valuation
-    # 2. Fallback to Standalone ONLY if Consolidated 404s (e.g., UJJIVANSFB)
+    soup = None
     urls_to_try = [
         f"https://www.screener.in/company/{symbol}/consolidated/",
         f"https://www.screener.in/company/{symbol}/"
@@ -1075,7 +1070,6 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     else:
         add_item("Capital Efficiency", "3 Yr Sales CAGR", "N/A", 2, 5, "ℹ️ Info", "Sales CAGR data not reported")
 
-    # Corrected PAT CAGR Logic
     if p_cagr is not None:
         if p_cagr >= 12:
             add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 5, 5, "🟢 Pass", "Strong profit expansion (> 12%)")
@@ -1262,7 +1256,7 @@ sidebar.title("EU QUICK FUNDA CHECK")
 sidebar.divider()
 
 with sidebar.form("audit_form"):
-    ticker_input = st.text_input("Enter NSE Ticker", value="HDFC").upper()
+    ticker_input = st.text_input("Enter NSE Ticker", value="COFORGE").upper()
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
 
 if ticker_input:
@@ -1339,7 +1333,7 @@ if ticker_input:
         if red_flags_cnt >= 2:
             st.error(f"**CRITICAL FORENSIC ALERT:** {red_flags_cnt} High-Risk accounting or cash-flow red flags detected.")
         elif final_score >= 75:
-            st.success(f"**FINAL Verdict: STRONG PASS ({final_score}/100)** — Sound fundamentals across balance sheet, cash conversion, and capital returns.")
+            st.success(f"**FINAL VERDICT: STRONG PASS ({final_score}/100)** — Sound fundamentals across balance sheet, cash conversion, and capital returns.")
         elif final_score >= 55:
             st.warning(f"**FINAL VERDICT: CONDITIONAL / WATCHLIST ({final_score}/100)** — Moderate profile. Review individual caution flags before entry.")
         else:
