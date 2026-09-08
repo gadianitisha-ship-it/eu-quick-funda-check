@@ -956,16 +956,39 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 2, 5, "🟡 Caution", "Elevated relative to historical baseline")
 
-    p_cf = safe_float(m.get("Price_to_CashFlow"))
-    if p_cf is not None and not m.get("is_bfsi"):
-        if p_cf <= 20:
-            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 5, 5, "🟢 Pass", "Healthy cash multiple")
-        elif p_cf > 35:
-            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 2, 5, "🟡 Caution", "Very high — check if in capex growth phase")
-        else:
-            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 4, 5, "🟢 Pass", "Moderate cash multiple")
+   # Price to Cash Flow Fix
+    if m.get("is_bfsi"):
+        add_item("Valuation", "Price to Cash Flow (Audited)", "BFSI Exempt", 5, 5, "🟢 Pass", "Cash flow multiples waived for financial institutions")
     else:
-        add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO / NA", 0, 5, "🔴 Caution", "Negative cash flow or data unavailable")
+        p_cf = safe_float(m.get("Price_to_CashFlow"))
+        if p_cf is not None:
+            if p_cf <= 20:
+                add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 5, 5, "🟢 Pass", "Healthy cash multiple")
+            elif p_cf > 35:
+                add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 2, 5, "🟡 Caution", "Very high — check if in capex growth phase")
+            else:
+                add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 4, 5, "🟢 Pass", "Moderate cash multiple")
+        else:
+            add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO / NA", 0, 5, "🔴 Caution", "Negative cash flow or data unavailable")
+
+    # CFO / OP Fix
+    if m.get("is_bfsi"):
+        add_item("Capital Efficiency", "CFO / OP (Audited)", "BFSI Exempt", 15, 15, "🟢 Pass", "Operating cash conversion waived for financial institutions")
+    else:
+        cfo_op = safe_float(m.get("CFO_OP_Ratio"))
+        cfo_period = m.get("CFO_OP_Period", "")
+        period_label = f" [{cfo_period}]" if cfo_period else ""
+        if cfo_op is not None:
+            if cfo_op >= 100:
+                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 15, 15, "🟢 Pass", "Comfortable range: If => 100 very good")
+            elif cfo_op >= 60:
+                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 12, 15, "🟢 Pass", "Comfortable range: 60-80%")
+            elif cfo_op < 50:
+                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 2, 15, "🔴 Caution", "If < 50 be cautious")
+            else:
+                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 8, 15, "🟡 Moderate", "Acceptable range (50-60%)")
+        else:
+            add_item("Capital Efficiency", "CFO / OP (Audited)", "Negative CFO / NA", 0, 15, "🔴 Caution", "Negative operating cash flow")
 
     # 5. CAPITAL EFFICIENCY & CONVERSION
     cfo_op = safe_float(m.get("CFO_OP_Ratio"))
