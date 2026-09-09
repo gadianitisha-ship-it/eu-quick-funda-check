@@ -147,11 +147,13 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
 
     eps_row = None
     net_profit_row = None
+    
+    # EXCLUSIONARY MATCHING: Grabs last match, ignores margins/%
     for idx in df_pl.index:
-        idx_lower = str(idx).lower()
-        if any(k in idx_lower for k in ["eps", "earnings per share", "basic eps"]) and not eps_row:
+        idx_lower = str(idx).lower().strip()
+        if any(k in idx_lower for k in ["eps", "earnings per share"]) and "margin" not in idx_lower and "%" not in idx_lower:
             eps_row = idx
-        if any(k in idx_lower for k in ["net profit", "net loss"]) and not net_profit_row:
+        if any(k in idx_lower for k in ["net profit", "net loss"]) and "margin" not in idx_lower and "%" not in idx_lower:
             net_profit_row = idx
 
     if not eps_row:
@@ -223,19 +225,22 @@ def compute_dupont_analysis(df_pl, df_bs):
     if df_pl is None or df_pl.empty or df_bs is None or df_bs.empty:
         return pd.DataFrame()
 
-    def get_first_matching_row(df, keywords):
+    def get_last_matching_row(df, keywords, exclude_kws=None):
+        exclude_kws = exclude_kws or []
+        matched_row = None
         for idx in df.index:
-            idx_str = str(idx).lower()
-            for kw in keywords:
-                if kw.lower() in idx_str:
-                    return df.loc[idx]
-        return None
+            idx_lower = str(idx).lower().strip()
+            if any(kw.lower() in idx_lower for kw in keywords):
+                if any(excl.lower() in idx_lower for excl in exclude_kws):
+                    continue
+                matched_row = df.loc[idx]
+        return matched_row
 
-    sales_row = get_first_matching_row(df_pl, ["Sales", "Revenue", "Interest Earned"])
-    pat_row = get_first_matching_row(df_pl, ["Net Profit"])
-    assets_row = get_first_matching_row(df_bs, ["Total Assets"])
-    eq_row = get_first_matching_row(df_bs, ["Equity Capital", "Share Capital"])
-    res_row = get_first_matching_row(df_bs, ["Reserves"])
+    sales_row = get_last_matching_row(df_pl, ["sales", "revenue", "interest earned"])
+    pat_row = get_last_matching_row(df_pl, ["net profit", "net loss"], exclude_kws=["margin", "%"])
+    assets_row = get_last_matching_row(df_bs, ["total assets"])
+    eq_row = get_last_matching_row(df_bs, ["equity capital", "share capital"])
+    res_row = get_last_matching_row(df_bs, ["reserves"])
 
     if sales_row is None or pat_row is None or assets_row is None or eq_row is None:
         return pd.DataFrame()
@@ -290,24 +295,29 @@ def evaluate_forensic_red_flags(d: dict):
             "Forensic Interpretation": interpretation
         })
 
-    def get_series(df, row_kw):
+    def get_series(df, row_kw, exclude_kws=None):
         if df is None or df.empty:
             return []
+        exclude_kws = exclude_kws or []
+        final_res = []
         for idx in df.index:
-            if row_kw.lower() in str(idx).lower():
+            idx_str = str(idx).lower().strip()
+            if row_kw.lower() in idx_str:
+                if any(excl.lower() in idx_str for excl in exclude_kws):
+                    continue
                 res = []
                 for val in df.loc[idx].values:
                     pf = safe_float(val)
                     if pf is not None:
                         res.append(pf)
-                return res
-        return []
+                final_res = res
+        return final_res
 
-    cfo_series = get_series(d["df_cf"], "Cash from Operating")
-    pat_series = get_series(d["df_pl"], "Net Profit")
-    sales_series = get_series(d["df_pl"], "Sales") or get_series(d["df_pl"], "Revenue")
-    assets_series = get_series(d["df_bs"], "Total Assets")
-    borrowings = get_series(d["df_bs"], "Borrowings")
+    cfo_series = get_series(d["df_cf"], "cash from operating")
+    pat_series = get_series(d["df_pl"], "net profit", exclude_kws=["margin", "%"])
+    sales_series = get_series(d["df_pl"], "sales") or get_series(d["df_pl"], "revenue")
+    assets_series = get_series(d["df_bs"], "total assets")
+    borrowings = get_series(d["df_bs"], "borrowings")
 
     if archetype != "BFSI":
         if len(cfo_series) >= 3 and len(pat_series) >= 3:
@@ -598,29 +608,42 @@ def scrape_full_screener(symbol: str):
     data["df_ratios"] = extract_full_table(["ratios"])
     data["df_shareholding"] = extract_full_table(["shareholding"])
 
-    def get_row_series_and_col(df, row_name):
+    def get_row_series_and_col(df, row_name, exclude_kws=None):
         if df is None or df.empty:
             return None, None
+        exclude_kws = exclude_kws or []
+        final_val, final_col = None, None
         for idx in df.index:
-            if row_name.lower() in str(idx).lower():
+            idx_str = str(idx).lower().strip()
+            if row_name.lower() in idx_str:
+                if any(excl.lower() in idx_str for excl in exclude_kws):
+                    continue
                 for col in reversed(df.columns):
                     val = safe_float(df.loc[idx, col])
                     if val is not None:
-                        return val, col
-        return None, None
+                        final_val = val
+                        final_col = col
+                        break
+        return final_val, final_col
 
-    def get_row_series(df, row_name):
+    def get_row_series(df, row_name, exclude_kws=None):
         if df is None or df.empty:
             return []
+        exclude_kws = exclude_kws or []
+        final_vals = []
         for idx in df.index:
-            if row_name.lower() in str(idx).lower():
+            idx_str = str(idx).lower().strip()
+            if row_name.lower() in idx_str:
+                if any(excl.lower() in idx_str for excl in exclude_kws):
+                    continue
                 vals = []
                 for val in df.loc[idx].values:
                     parsed = safe_float(val)
                     if parsed is not None:
                         vals.append(parsed)
-                return vals
-        return []
+                if vals:
+                    final_vals = vals
+        return final_vals
 
     # BFSI Asset Quality
     gnpa_val, gnpa_period = get_row_series_and_col(data["df_quarters"], "Gross NPA")
@@ -691,7 +714,7 @@ def scrape_full_screener(symbol: str):
     data["3Yr_Avg_ROE"] = safe_float(data["ROE_History"].get("3 Years"))
 
     op_series = get_row_series(data["df_pl"], "Operating Profit") or get_row_series(data["df_pl"], "Financing Profit")
-    eps_series = get_row_series(data["df_pl"], "EPS in Rs")
+    eps_series = get_row_series(data["df_pl"], "EPS in Rs", exclude_kws=["margin", "%"])
     cfo_series = get_row_series(data["df_cf"], "Cash from Operating")
     eq_cap = get_row_series(data["df_bs"], "Equity Capital") or get_row_series(data["df_bs"], "Share Capital")
     reserves = get_row_series(data["df_bs"], "Reserves")
@@ -770,8 +793,8 @@ def scrape_full_screener(symbol: str):
         data["Price_to_CashFlow"] = None
 
     data["audit_checks"] = []
-    tot_assets = get_row_series(data["df_bs"], "Total Assets")
-    tot_liab = get_row_series(data["df_bs"], "Total Liabilities")
+    tot_assets = get_row_series(data["df_bs"], "Total Assets", exclude_kws=["%"])
+    tot_liab = get_row_series(data["df_bs"], "Total Liabilities", exclude_kws=["%"])
     if tot_assets and tot_liab:
         bs_diff = abs(tot_assets[-1] - tot_liab[-1])
         data["audit_checks"].append({
@@ -855,6 +878,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     def get_series(df, row_kw):
         if df is None or df.empty:
             return []
+        final_res = []
         for idx in df.index:
             if row_kw.lower() in str(idx).lower():
                 res = []
@@ -862,8 +886,8 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
                     pf = safe_float(val)
                     if pf is not None:
                         res.append(pf)
-                return res
-        return []
+                final_res = res
+        return final_res
 
     # 1. OVERVIEW
     add_item("Overview", "NSE Symbol", m.get("Symbol"), 0, 0, "ℹ️ Info", "Stock Ticker")
@@ -1167,8 +1191,8 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
 
         roa = safe_float(m.get("ROA"), safe_float(m.get("Return on assets")))
         if roa is None:
-            np_vals = get_series(m.get("df_pl"), "Net Profit")
-            ta_vals = get_series(m.get("df_bs"), "Total Assets")
+            np_vals = get_series(m.get("df_pl"), "net profit", exclude_kws=["margin", "%"])
+            ta_vals = get_series(m.get("df_bs"), "total assets")
             if np_vals and ta_vals and ta_vals[-1] > 0:
                 roa = round((np_vals[-1] / ta_vals[-1]) * 100, 2)
 
@@ -1299,7 +1323,7 @@ sidebar.title("EU QUICK FUNDA CHECK")
 sidebar.divider()
 
 with sidebar.form("audit_form"):
-    ticker_input = st.text_input("Enter NSE Ticker", value="HDFCBANK").upper()
+    ticker_input = st.text_input("Enter NSE Ticker", value="PILANIINVS").upper()
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
 
 if ticker_input:
