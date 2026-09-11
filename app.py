@@ -503,27 +503,6 @@ def scrape_full_screener(symbol: str):
     company_id = company_id_match.group(1) if company_id_match else None
     data["Company_ID"] = company_id
 
-    # ---- [NEW] API INTEGRATION: EXTRACT HIDDEN CASH FLOW SCHEDULES ----
-    data["Direct_Taxes_List"] = []
-    if company_id:
-        try:
-            cfo_api_url = f"https://www.screener.in/api/company/{company_id}/schedules/?schedule_type=cfo"
-            res_cfo = session.get(cfo_api_url, timeout=3.5)
-            if res_cfo.status_code == 200 and len(res_cfo.text) > 10:
-                sched_soup = BeautifulSoup(res_cfo.text, 'html.parser')
-                # Parse the injected HTML rows
-                for tr in sched_soup.find_all('tr'):
-                    first_td = tr.find('td')
-                    if first_td:
-                        lbl = first_td.text.lower()
-                        # Strictly hunt for the Direct taxes row
-                        if "direct taxes" in lbl or "taxes paid" in lbl:
-                            tds = tr.find_all('td')[1:] # Skip the label cell
-                            data["Direct_Taxes_List"] = [safe_float(td.text) for td in tds]
-                            break
-        except Exception:
-            pass
-
     # Peers Table
     data["df_peers"] = pd.DataFrame()
     if company_id:
@@ -785,35 +764,27 @@ def scrape_full_screener(symbol: str):
         if col in data["df_pl"].columns and col.lower() != 'ttm'
     ]
 
-    # PRE-TAX CASH CONVERSION LOGIC
+    # DIRECT CFO/OP EXTRACTION
     if common_years:
         latest_yr = common_years[-1]
-        cfo_final_matched = get_row_series(data["df_cf"][[latest_yr]], "Cash from Operating")
-        op_matched = get_row_series(data["df_pl"][[latest_yr]], "Operating Profit") or get_row_series(data["df_pl"][[latest_yr]], "Financing Profit")
+        data["CFO_OP_Period"] = f"FY {latest_yr}"
+
+        # 1. Grab Latest CFO for other validation checks (Price to Cash Flow)
+        cfo_final_matched = get_row_series(data["df_cf"][[latest_yr]], "cash from operating")
+        data["Latest_CFO_Final"] = cfo_final_matched[0] if cfo_final_matched else None
+
+        # 2. Directly scrape Screener's native CFO/OP row to guarantee an exact match
+        native_cfo_op = get_row_series(data["df_cf"][[latest_yr]], "cfo/op")
         
-        if cfo_final_matched and op_matched and op_matched[0] != 0:
-            cfo_final = cfo_final_matched[0]
-            op_val = op_matched[0]
-            
-            # Fetch the actual tax amount extracted directly from Screener's API
-            taxes_val = 0.0
-            if data.get("Direct_Taxes_List") and len(data["Direct_Taxes_List"]) > 0:
-                # The API strictly matches columns. The last element aligns with the latest_yr column.
-                tv = data["Direct_Taxes_List"][-1]
-                if tv is not None:
-                    taxes_val = tv
-            
-            # Subtacting the tax outflow (which is negative) mathematically reverses it back into the CFO 
-            # (e.g. 129 + abs(-60) = 189)
-            pre_tax_cfo = cfo_final + abs(taxes_val)
-            
-            data["CFO_OP_Ratio"] = round((pre_tax_cfo / op_val) * 100, 1)
-            data["Latest_CFO_Final"] = cfo_final
-            data["CFO_OP_Period"] = f"FY {latest_yr}"
+        if native_cfo_op:
+            data["CFO_OP_Ratio"] = native_cfo_op[0]
         else:
-            data["CFO_OP_Ratio"] = None
-            data["Latest_CFO_Final"] = None
-            data["CFO_OP_Period"] = "N/A"
+            # Absolute fallback if Screener ever removes the row
+            op_matched = get_row_series(data["df_pl"][[latest_yr]], "operating profit") or get_row_series(data["df_pl"][[latest_yr]], "financing profit")
+            if cfo_final_matched and op_matched and op_matched[0] != 0:
+                data["CFO_OP_Ratio"] = round((cfo_final_matched[0] / op_matched[0]) * 100, 1)
+            else:
+                data["CFO_OP_Ratio"] = None
     else:
         data["CFO_OP_Ratio"] = None
         data["Latest_CFO_Final"] = None
@@ -1057,7 +1028,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO / NA", 0, 5, "🔴 Caution", "Negative cash flow or data unavailable")
 
-    # 5. CAPITAL EFFICIENCY & CONVERSION (Pre-Tax)
+    # 5. CAPITAL EFFICIENCY & CONVERSION (Native Match)
     cfo_op = safe_float(m.get("CFO_OP_Ratio"))
     cfo_period = m.get("CFO_OP_Period", "")
     period_label = f" [{cfo_period}]" if cfo_period and cfo_period != "N/A" else ""
@@ -1070,19 +1041,19 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             cfo_op_str = f"Negative CFO (₹{format_inr(latest_cfo)} Cr)"
         else:
             cfo_op_str = "Data Unavailable"
-        add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", cfo_op_str, 0, 0, "ℹ️ Info", "Operating cash conversion waived for financial institutions")
+        add_item("Capital Efficiency", "CFO / OP (Audited)", cfo_op_str, 0, 0, "ℹ️ Info", "Operating cash conversion waived for financial institutions")
     else:
         if cfo_op is not None:
             if cfo_op >= 100:
-                add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", f"{cfo_op}%{period_label}", 15, 15, "🟢 Pass", "Pre-Tax cash conversion is pristine (>= 100%)")
+                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 15, 15, "🟢 Pass", "Comfortable range: If => 100 very good")
             elif cfo_op >= 60:
-                add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", f"{cfo_op}%{period_label}", 12, 15, "🟢 Pass", "Comfortable Pre-Tax conversion (60-80%)")
+                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 12, 15, "🟢 Pass", "Comfortable range: 60-80%")
             elif cfo_op < 50:
-                add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", f"{cfo_op}%{period_label}", 2, 15, "🔴 Caution", "Poor conversion. Operating profit trapped in working capital")
+                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 2, 15, "🔴 Caution", "If < 50 be cautious (Operating profit not translating to cash)")
             else:
-                add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", f"{cfo_op}%{period_label}", 8, 15, "🟡 Moderate", "Acceptable Pre-Tax range (50-60%)")
+                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 8, 15, "🟡 Moderate", "Acceptable range (50-60%)")
         else:
-            add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", "Negative CFO / NA", 0, 15, "🔴 Caution", "Negative operating cash flow")
+            add_item("Capital Efficiency", "CFO / OP (Audited)", "Negative CFO / NA", 0, 15, "🔴 Caution", "Negative operating cash flow")
 
     roe = safe_float(m.get("ROE"))
     avg_roe = safe_float(m.get("3Yr_Avg_ROE"))
@@ -1237,7 +1208,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
 
         roa = safe_float(m.get("ROA"), safe_float(m.get("Return on assets")))
         if roa is None:
-            np_vals = get_series(m.get("df_pl"), "net profit", exclude_kws=["margin", "%"])
+            np_vals = get_series(m.get("df_pl"), "net profit")
             ta_vals = get_series(m.get("df_bs"), "total assets")
             if np_vals and ta_vals and ta_vals[-1] > 0:
                 roa = round((np_vals[-1] / ta_vals[-1]) * 100, 2)
