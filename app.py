@@ -148,7 +148,6 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     eps_row = None
     net_profit_row = None
     
-    # EXCLUSIONARY MATCHING: Grabs last match, ignores margins/%
     for idx in df_pl.index:
         idx_lower = str(idx).lower().strip()
         if any(k in idx_lower for k in ["eps", "earnings per share"]) and "margin" not in idx_lower and "%" not in idx_lower:
@@ -566,6 +565,19 @@ def scrape_full_screener(symbol: str):
                     parsed = safe_float(val_clean)
                     data[name] = parsed if parsed is not None else val_clean
 
+    # Fallback to calculate Industry PE from the Peers table if not natively found
+    if data.get("Industry PE") is None and not data.get("df_peers", pd.DataFrame()).empty:
+        if "P/E" in data["df_peers"].columns:
+            peer_pes = []
+            for idx, row in data["df_peers"].iterrows():
+                # Skip the aggregate Median row if it exists
+                if "Median" not in str(row.get("Name", "")) and "Median" not in str(row.get("#", "")):
+                    val = safe_float(row["P/E"])
+                    if val is not None and val > 0:
+                        peer_pes.append(val)
+            if peer_pes:
+                data["Industry PE"] = round(float(np.median(peer_pes)), 2)
+
     def extract_full_table(section_patterns):
         if isinstance(section_patterns, str):
             section_patterns = [section_patterns]
@@ -978,15 +990,16 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     # 4. VALUATION MULTIPLES
     pe = safe_float(m.get("Stock P/E"))
     ind_pe = safe_float(m.get("Industry PE"))
+    
     if pe is not None and pe > 0:
         if ind_pe is not None and ind_pe > 0:
             spread = pe - ind_pe
             if spread > 25:
-                add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 4, 10, "🟡 Caution", "Way above Industry PE / check 10-15 yr PE chart & Mean")
+                add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: {ind_pe}", 4, 10, "🟡 Caution", "Way above Industry PE / check 10-15 yr PE chart & Mean")
             elif spread < -15:
-                add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 7, 10, "🟡 Caution", "Way below Industry PE / check for value trap")
+                add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: {ind_pe}", 7, 10, "🟡 Caution", "Way below Industry PE / check for value trap")
             else:
-                add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 10, 10, "🟢 Pass", "Aligned with Industry PE")
+                add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: {ind_pe}", 10, 10, "🟢 Pass", "Aligned with Industry PE")
         else:
             if pe <= 35:
                 add_item("Valuation", "Stock P/E (TTM)", f"{pe}", 10, 10, "🟢 Pass", "Reasonable valuation multiple")
@@ -1028,7 +1041,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO / NA", 0, 5, "🔴 Caution", "Negative cash flow or data unavailable")
 
-    # 5. CAPITAL EFFICIENCY & CONVERSION (Native Match)
+    # 5. CAPITAL EFFICIENCY & CONVERSION
     cfo_op = safe_float(m.get("CFO_OP_Ratio"))
     cfo_period = m.get("CFO_OP_Period", "")
     period_label = f" [{cfo_period}]" if cfo_period and cfo_period != "N/A" else ""
@@ -1403,12 +1416,13 @@ if ticker_input:
             use_container_width=True
         )
 
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("CMP (Live)", f"₹{format_inr(d.get('Current Price'))}")
         col2.metric("Market Cap", f"₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr")
-        col3.metric("Stock P/E (TTM)", d.get('Stock P/E', 'N/A'))
-        col4.metric("Forensic Red Flags", f"{red_flags_cnt} High Risk", delta=f"{warnings_cnt} Cautions", delta_color="inverse")
-        col5.metric("Checklist Score", f"{final_score} / 100", delta=d.get("Archetype"))
+        col3.metric("Stock P/E", d.get('Stock P/E', 'N/A'))
+        col4.metric("Industry P/E", d.get('Industry PE', 'N/A'))
+        col5.metric("Red Flags", f"{red_flags_cnt} High Risk", delta=f"{warnings_cnt} Cautions", delta_color="inverse")
+        col6.metric("Audit Score", f"{final_score} / 100", delta=d.get("Archetype"))
         
         st.write(f"### {d.get('Company Name')} (`{d.get('Symbol')}`) — *{d.get('Archetype')} Diagnostic Model*")
         if d.get("Sector_Desc"):
