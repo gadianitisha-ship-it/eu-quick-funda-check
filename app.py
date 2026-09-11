@@ -503,6 +503,27 @@ def scrape_full_screener(symbol: str):
     company_id = company_id_match.group(1) if company_id_match else None
     data["Company_ID"] = company_id
 
+    # ---- [NEW] API INTEGRATION: EXTRACT HIDDEN CASH FLOW SCHEDULES ----
+    data["Direct_Taxes_List"] = []
+    if company_id:
+        try:
+            cfo_api_url = f"https://www.screener.in/api/company/{company_id}/schedules/?schedule_type=cfo"
+            res_cfo = session.get(cfo_api_url, timeout=3.5)
+            if res_cfo.status_code == 200 and len(res_cfo.text) > 10:
+                sched_soup = BeautifulSoup(res_cfo.text, 'html.parser')
+                # Parse the injected HTML rows
+                for tr in sched_soup.find_all('tr'):
+                    first_td = tr.find('td')
+                    if first_td:
+                        lbl = first_td.text.lower()
+                        # Strictly hunt for the Direct taxes row
+                        if "direct taxes" in lbl or "taxes paid" in lbl:
+                            tds = tr.find_all('td')[1:] # Skip the label cell
+                            data["Direct_Taxes_List"] = [safe_float(td.text) for td in tds]
+                            break
+        except Exception:
+            pass
+
     # Peers Table
     data["df_peers"] = pd.DataFrame()
     if company_id:
@@ -769,15 +790,22 @@ def scrape_full_screener(symbol: str):
         latest_yr = common_years[-1]
         cfo_final_matched = get_row_series(data["df_cf"][[latest_yr]], "Cash from Operating")
         op_matched = get_row_series(data["df_pl"][[latest_yr]], "Operating Profit") or get_row_series(data["df_pl"][[latest_yr]], "Financing Profit")
-        taxes_matched = get_row_series(data["df_cf"][[latest_yr]], "direct taxes") or get_row_series(data["df_cf"][[latest_yr]], "taxes paid")
         
         if cfo_final_matched and op_matched and op_matched[0] != 0:
             cfo_final = cfo_final_matched[0]
             op_val = op_matched[0]
             
-            # Subtacting the tax outflow (which is a negative number) mathematically adds it back
-            taxes_val = taxes_matched[0] if taxes_matched else 0.0
-            pre_tax_cfo = cfo_final - taxes_val if taxes_val < 0 else cfo_final + taxes_val
+            # Fetch the actual tax amount extracted directly from Screener's API
+            taxes_val = 0.0
+            if data.get("Direct_Taxes_List") and len(data["Direct_Taxes_List"]) > 0:
+                # The API strictly matches columns. The last element aligns with the latest_yr column.
+                tv = data["Direct_Taxes_List"][-1]
+                if tv is not None:
+                    taxes_val = tv
+            
+            # Subtacting the tax outflow (which is negative) mathematically reverses it back into the CFO 
+            # (e.g. 129 + abs(-60) = 189)
+            pre_tax_cfo = cfo_final + abs(taxes_val)
             
             data["CFO_OP_Ratio"] = round((pre_tax_cfo / op_val) * 100, 1)
             data["Latest_CFO_Final"] = cfo_final
