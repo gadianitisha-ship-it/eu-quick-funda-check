@@ -764,29 +764,37 @@ def scrape_full_screener(symbol: str):
         if col in data["df_pl"].columns and col.lower() != 'ttm'
     ]
 
+    # PRE-TAX CASH CONVERSION LOGIC
     if common_years:
         latest_yr = common_years[-1]
-        cfo_matched = get_row_series(data["df_cf"][[latest_yr]], "Cash from Operating")
+        cfo_final_matched = get_row_series(data["df_cf"][[latest_yr]], "Cash from Operating")
         op_matched = get_row_series(data["df_pl"][[latest_yr]], "Operating Profit") or get_row_series(data["df_pl"][[latest_yr]], "Financing Profit")
+        taxes_matched = get_row_series(data["df_cf"][[latest_yr]], "direct taxes") or get_row_series(data["df_cf"][[latest_yr]], "taxes paid")
         
-        if cfo_matched and op_matched and op_matched[0] != 0:
-            data["CFO_OP_Ratio"] = round((cfo_matched[0] / op_matched[0]) * 100, 1)
-            data["Latest_CFO"] = cfo_matched[0]
-            data["Latest_OP_Annual"] = op_matched[0]
+        if cfo_final_matched and op_matched and op_matched[0] != 0:
+            cfo_final = cfo_final_matched[0]
+            op_val = op_matched[0]
+            
+            # Subtacting the tax outflow (which is a negative number) mathematically adds it back
+            taxes_val = taxes_matched[0] if taxes_matched else 0.0
+            pre_tax_cfo = cfo_final - taxes_val if taxes_val < 0 else cfo_final + taxes_val
+            
+            data["CFO_OP_Ratio"] = round((pre_tax_cfo / op_val) * 100, 1)
+            data["Latest_CFO_Final"] = cfo_final
             data["CFO_OP_Period"] = f"FY {latest_yr}"
         else:
             data["CFO_OP_Ratio"] = None
-            data["Latest_CFO"] = None
+            data["Latest_CFO_Final"] = None
             data["CFO_OP_Period"] = "N/A"
     else:
         data["CFO_OP_Ratio"] = None
-        data["Latest_CFO"] = None
+        data["Latest_CFO_Final"] = None
         data["CFO_OP_Period"] = "N/A"
 
     mcap = safe_float(data.get("Market Cap"), 0.0)
-    if data.get("Latest_CFO") and mcap > 0:
-        if data["Latest_CFO"] > 0:
-            data["Price_to_CashFlow"] = round(mcap / data["Latest_CFO"], 2)
+    if data.get("Latest_CFO_Final") and mcap > 0:
+        if data["Latest_CFO_Final"] > 0:
+            data["Price_to_CashFlow"] = round(mcap / data["Latest_CFO_Final"], 2)
         else:
             data["Price_to_CashFlow"] = None
     else:
@@ -817,7 +825,7 @@ def scrape_full_screener(symbol: str):
     data["DII_Latest"] = dii_vals[-1] if dii_vals else 0.0
     data["Pledge_Latest"] = pledge_vals[-1] if pledge_vals else 0.0
     
-    # NEW MACRO TREND LOGIC: Looks back 1 year (4 quarters) to bypass single-quarter noise
+    # MACRO TREND LOGIC: Looks back 1 year (4 quarters) to bypass single-quarter noise
     def calc_macro_trend(vals):
         if not vals or len(vals) < 2:
             return "Decreasing"
@@ -1001,7 +1009,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
 
     if m.get("is_bfsi"):
         p_cf = safe_float(m.get("Price_to_CashFlow"))
-        latest_cfo = safe_float(m.get("Latest_CFO"))
+        latest_cfo = safe_float(m.get("Latest_CFO_Final"))
         if p_cf is not None:
             pcf_str = f"{p_cf}"
         elif latest_cfo is not None and latest_cfo < 0:
@@ -1021,32 +1029,32 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO / NA", 0, 5, "🔴 Caution", "Negative cash flow or data unavailable")
 
-    # 5. CAPITAL EFFICIENCY & CONVERSION
+    # 5. CAPITAL EFFICIENCY & CONVERSION (Pre-Tax)
     cfo_op = safe_float(m.get("CFO_OP_Ratio"))
     cfo_period = m.get("CFO_OP_Period", "")
     period_label = f" [{cfo_period}]" if cfo_period and cfo_period != "N/A" else ""
     
     if m.get("is_bfsi"):
-        latest_cfo = safe_float(m.get("Latest_CFO"))
+        latest_cfo = safe_float(m.get("Latest_CFO_Final"))
         if cfo_op is not None:
             cfo_op_str = f"{cfo_op}%{period_label}"
         elif latest_cfo is not None and latest_cfo < 0:
             cfo_op_str = f"Negative CFO (₹{format_inr(latest_cfo)} Cr)"
         else:
             cfo_op_str = "Data Unavailable"
-        add_item("Capital Efficiency", "CFO / OP (Audited)", cfo_op_str, 0, 0, "ℹ️ Info", "Operating cash conversion waived for financial institutions")
+        add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", cfo_op_str, 0, 0, "ℹ️ Info", "Operating cash conversion waived for financial institutions")
     else:
         if cfo_op is not None:
             if cfo_op >= 100:
-                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 15, 15, "🟢 Pass", "Comfortable range: If => 100 very good")
+                add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", f"{cfo_op}%{period_label}", 15, 15, "🟢 Pass", "Pre-Tax cash conversion is pristine (>= 100%)")
             elif cfo_op >= 60:
-                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 12, 15, "🟢 Pass", "Comfortable range: 60-80%")
+                add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", f"{cfo_op}%{period_label}", 12, 15, "🟢 Pass", "Comfortable Pre-Tax conversion (60-80%)")
             elif cfo_op < 50:
-                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 2, 15, "🔴 Caution", "If < 50 be cautious (Operating profit not translating to cash)")
+                add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", f"{cfo_op}%{period_label}", 2, 15, "🔴 Caution", "Poor conversion. Operating profit trapped in working capital")
             else:
-                add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 8, 15, "🟡 Moderate", "Acceptable range (50-60%)")
+                add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", f"{cfo_op}%{period_label}", 8, 15, "🟡 Moderate", "Acceptable Pre-Tax range (50-60%)")
         else:
-            add_item("Capital Efficiency", "CFO / OP (Audited)", "Negative CFO / NA", 0, 15, "🔴 Caution", "Negative operating cash flow")
+            add_item("Capital Efficiency", "Pre-Tax CFO / OP (Audited)", "Negative CFO / NA", 0, 15, "🔴 Caution", "Negative operating cash flow")
 
     roe = safe_float(m.get("ROE"))
     avg_roe = safe_float(m.get("3Yr_Avg_ROE"))
