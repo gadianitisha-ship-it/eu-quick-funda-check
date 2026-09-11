@@ -148,6 +148,7 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     eps_row = None
     net_profit_row = None
     
+    # EXCLUSIONARY MATCHING: Grabs last match, ignores margins/%
     for idx in df_pl.index:
         idx_lower = str(idx).lower().strip()
         if any(k in idx_lower for k in ["eps", "earnings per share"]) and "margin" not in idx_lower and "%" not in idx_lower:
@@ -458,10 +459,14 @@ def fetch_nse_delivery_data(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def scrape_full_screener(symbol: str):
+def scrape_full_screener(symbol: str, session_cookie: str = ""):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
+    
+    # Inject authenticated session cookie to bypass API restrictions
+    if session_cookie:
+        session.cookies.set("sessionid", session_cookie.strip(), domain=".screener.in")
 
     soup = None
     urls_to_try = [
@@ -564,19 +569,6 @@ def scrape_full_screener(symbol: str):
                 else:
                     parsed = safe_float(val_clean)
                     data[name] = parsed if parsed is not None else val_clean
-
-    # Fallback to calculate Industry PE from the Peers table if not natively found
-    if data.get("Industry PE") is None and not data.get("df_peers", pd.DataFrame()).empty:
-        if "P/E" in data["df_peers"].columns:
-            peer_pes = []
-            for idx, row in data["df_peers"].iterrows():
-                # Skip the aggregate Median row if it exists
-                if "Median" not in str(row.get("Name", "")) and "Median" not in str(row.get("#", "")):
-                    val = safe_float(row["P/E"])
-                    if val is not None and val > 0:
-                        peer_pes.append(val)
-            if peer_pes:
-                data["Industry PE"] = round(float(np.median(peer_pes)), 2)
 
     def extract_full_table(section_patterns):
         if isinstance(section_patterns, str):
@@ -1221,7 +1213,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
 
         roa = safe_float(m.get("ROA"), safe_float(m.get("Return on assets")))
         if roa is None:
-            np_vals = get_series(m.get("df_pl"), "net profit")
+            np_vals = get_series(m.get("df_pl"), "net profit", exclude_kws=["margin", "%"])
             ta_vals = get_series(m.get("df_bs"), "total assets")
             if np_vals and ta_vals and ta_vals[-1] > 0:
                 roa = round((np_vals[-1] / ta_vals[-1]) * 100, 2)
@@ -1354,11 +1346,12 @@ sidebar.divider()
 
 with sidebar.form("audit_form"):
     ticker_input = st.text_input("Enter NSE Ticker", value="TDPOWERSYS").upper()
+    cookie_input = st.text_input("Screener 'sessionid' (Optional)", type="password", help="F12 > Application > Cookies > sessionid")
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
 
 if ticker_input:
     with st.spinner(f"Auditing institutional financials for {ticker_input}..."):
-        d = scrape_full_screener(ticker_input)
+        d = scrape_full_screener(ticker_input, cookie_input)
         
         df_annual_pe, pe_stats = compute_authentic_historical_pes(
             d["df_pl"] if d else pd.DataFrame(),
