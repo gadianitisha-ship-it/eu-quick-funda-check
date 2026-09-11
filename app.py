@@ -817,9 +817,16 @@ def scrape_full_screener(symbol: str):
     data["DII_Latest"] = dii_vals[-1] if dii_vals else 0.0
     data["Pledge_Latest"] = pledge_vals[-1] if pledge_vals else 0.0
     
-    data["Promoter_Trend"] = "Increasing" if len(promoter_vals) >= 2 and promoter_vals[-1] >= promoter_vals[-2] else "Decreasing"
-    data["FII_Trend"] = "Increasing" if len(fii_vals) >= 2 and fii_vals[-1] >= fii_vals[-2] else "Decreasing"
-    data["DII_Trend"] = "Increasing" if len(dii_vals) >= 2 and dii_vals[-1] >= dii_vals[-2] else "Decreasing"
+    # NEW MACRO TREND LOGIC: Looks back 1 year (4 quarters) to bypass single-quarter noise
+    def calc_macro_trend(vals):
+        if not vals or len(vals) < 2:
+            return "Decreasing"
+        lookback = -5 if len(vals) >= 5 else -len(vals)
+        return "Increasing" if vals[-1] >= vals[lookback] else "Decreasing"
+
+    data["Promoter_Trend"] = calc_macro_trend(promoter_vals)
+    data["FII_Trend"] = calc_macro_trend(fii_vals)
+    data["DII_Trend"] = calc_macro_trend(dii_vals)
 
     borrowings = get_row_series(data["df_bs"], "Borrowings")
     other_assets = get_row_series(data["df_bs"], "Other Assets")
@@ -1094,20 +1101,23 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     def format_hist(arr):
         return " → ".join([f"{x:.1f}%" for x in arr]) if arr else "N/A"
 
+    # FII Trailing Trend Eval
     fii_val = safe_float(m.get("FII_Latest"), 0.0)
     fii_hist = format_hist(m.get("FII_History", []))
     if m.get("FII_Trend") == "Increasing":
-        add_item("Ownership & Governance", "FII Holding (Last 5-6 Qtrs QoQ)", f"{fii_val}% [{fii_hist}]", 5, 5, "🟢 Pass", "Check last 5-6 Qtrs, QoQ (FII accumulating)")
+        add_item("Ownership & Governance", "FII Trailing Trend (1-Yr)", f"{fii_val}% [{fii_hist}]", 5, 5, "🟢 Pass", "FII accumulating over the trailing 4-5 quarters")
     else:
-        add_item("Ownership & Governance", "FII Holding (Last 5-6 Qtrs QoQ)", f"{fii_val}% [{fii_hist}]", 2, 5, "🟡 Moderate", "Check last 5-6 Qtrs, QoQ (FII reduced QoQ)")
+        add_item("Ownership & Governance", "FII Trailing Trend (1-Yr)", f"{fii_val}% [{fii_hist}]", 2, 5, "🟡 Moderate", "FII holding reduced over the trailing year")
 
+    # DII Trailing Trend Eval
     dii_val = safe_float(m.get("DII_Latest"), 0.0)
     dii_hist = format_hist(m.get("DII_History", []))
     if m.get("DII_Trend") == "Increasing":
-        add_item("Ownership & Governance", "DII Holding (Last 5-6 Qtrs QoQ)", f"{dii_val}% [{dii_hist}]", 5, 5, "🟢 Pass", "Check last 5-6 Qtrs, QoQ (DII accumulating)")
+        add_item("Ownership & Governance", "DII Trailing Trend (1-Yr)", f"{dii_val}% [{dii_hist}]", 5, 5, "🟢 Pass", "DII accumulating over the trailing 4-5 quarters")
     else:
-        add_item("Ownership & Governance", "DII Holding (Last 5-6 Qtrs QoQ)", f"{dii_val}% [{dii_hist}]", 2, 5, "🟡 Moderate", "Check last 5-6 Qtrs, QoQ (DII reduced QoQ)")
+        add_item("Ownership & Governance", "DII Trailing Trend (1-Yr)", f"{dii_val}% [{dii_hist}]", 2, 5, "🟡 Moderate", "DII holding reduced over the trailing year")
 
+    # Promoter Trailing Trend Eval
     prom_val = safe_float(m.get("Promoter_Latest"), 0.0)
     prom_hist = format_hist(m.get("Promoter_History", []))
     total_inst = safe_float(m.get("FII_Latest"), 0.0) + safe_float(m.get("DII_Latest"), 0.0)
@@ -1115,17 +1125,17 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     if prom_val == 0.0 and total_inst >= 50.0:
         add_item(
             "Ownership & Governance",
-            "Prom Holding (Last 5-6 Qtrs QoQ)",
+            "Promoter Holding (1-Yr Trend)",
             "0.0% [Professionally Managed]",
             5,
             5,
             "🟢 Pass",
-            f"Professionally managed / board-run entity (Institutional Custody: {total_inst:.1f}% FII+DII)"
+            f"Professionally managed (Institutional Custody: {total_inst:.1f}%)"
         )
     elif prom_val >= 50 or m.get("Promoter_Trend") == "Increasing":
-        add_item("Ownership & Governance", "Prom Holding (Last 5-6 Qtrs QoQ)", f"{prom_val}% [{prom_hist}]", 5, 5, "🟢 Pass", "Check last 5-6 Qtrs, QoQ (Strong promoter ownership)")
+        add_item("Ownership & Governance", "Promoter Holding (1-Yr Trend)", f"{prom_val}% [{prom_hist}]", 5, 5, "🟢 Pass", "Strong promoter ownership or accumulation")
     else:
-        add_item("Ownership & Governance", "Prom Holding (Last 5-6 Qtrs QoQ)", f"{prom_val}% [{prom_hist}]", 3, 5, "🟡 Caution", "Check last 5-6 Qtrs, QoQ (Promoter holding declined / low)")
+        add_item("Ownership & Governance", "Promoter Holding (1-Yr Trend)", f"{prom_val}% [{prom_hist}]", 3, 5, "🟡 Caution", "Promoter holding declined over the trailing year")
 
     s_cagr = safe_float(m.get("3Yr_Sales_CAGR"))
     p_cagr = safe_float(m.get("3Yr_PAT_CAGR"))
@@ -1323,7 +1333,7 @@ sidebar.title("EU QUICK FUNDA CHECK")
 sidebar.divider()
 
 with sidebar.form("audit_form"):
-    ticker_input = st.text_input("Enter NSE Ticker", value="PILANIINVS").upper()
+    ticker_input = st.text_input("Enter NSE Ticker", value="TDPOWERSYS").upper()
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
 
 if ticker_input:
