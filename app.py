@@ -10,7 +10,9 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import yfinance as yf
 
+# ----------------- AUTHENTICATION & CONFIG -----------------
 LOGO_FILE = "logo.png"
+SCREENER_SESSION_ID = "r3urgq7ycs7bw09j22nffzntc0hd5dl3"
 
 st.set_page_config(
     page_title="EU QUICK FUNDA CHECK",
@@ -148,7 +150,6 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     eps_row = None
     net_profit_row = None
     
-    # EXCLUSIONARY MATCHING: Grabs last match, ignores margins/%
     for idx in df_pl.index:
         idx_lower = str(idx).lower().strip()
         if any(k in idx_lower for k in ["eps", "earnings per share"]) and "margin" not in idx_lower and "%" not in idx_lower:
@@ -459,14 +460,15 @@ def fetch_nse_delivery_data(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = ""):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
     
-    # Inject authenticated session cookie to bypass API restrictions
+    # Authenticate directly via cookies and request headers
     if session_cookie:
-        session.cookies.set("sessionid", session_cookie.strip(), domain=".screener.in")
+        session.cookies.update({"sessionid": session_cookie.strip()})
+        session.headers.update({"Cookie": f"sessionid={session_cookie.strip()}"})
 
     soup = None
     urls_to_try = [
@@ -555,20 +557,23 @@ def scrape_full_screener(symbol: str, session_cookie: str = ""):
     data["live_announcements"] = documents_list[:6]
     data["live_concalls"] = concall_list[:6]
 
-    # Quick Top Ratios
+    # Flexible Ratio Parser
     top_ratios = soup.find('ul', {'id': 'top-ratios'}) or soup.find('div', class_='company-ratios')
     if top_ratios:
         for li in top_ratios.find_all(['li', 'div']):
             name_el = li.find('span', class_='name')
             val_el = li.find('span', class_='nowrap value') or li.find('span', class_='value')
             if name_el and val_el:
-                name = name_el.text.strip()
+                raw_name = name_el.text.strip()
+                clean_name = re.sub(r'\s+', ' ', raw_name)
                 val_clean = val_el.text.replace(',', '').replace('₹', '').strip()
-                if "/" in val_clean:
-                    data[name] = val_clean
-                else:
-                    parsed = safe_float(val_clean)
-                    data[name] = parsed if parsed is not None else val_clean
+                parsed = safe_float(val_clean)
+                final_val = parsed if parsed is not None else val_clean
+                
+                data[clean_name] = final_val
+                # Store normalized key to avoid case/space mismatches
+                norm_key = re.sub(r'[^a-zA-Z0-9]', '', clean_name).lower()
+                data[norm_key] = final_val
 
     def extract_full_table(section_patterns):
         if isinstance(section_patterns, str):
@@ -773,17 +778,13 @@ def scrape_full_screener(symbol: str, session_cookie: str = ""):
         latest_yr = common_years[-1]
         data["CFO_OP_Period"] = f"FY {latest_yr}"
 
-        # 1. Grab Latest CFO for other validation checks (Price to Cash Flow)
         cfo_final_matched = get_row_series(data["df_cf"][[latest_yr]], "cash from operating")
         data["Latest_CFO_Final"] = cfo_final_matched[0] if cfo_final_matched else None
 
-        # 2. Directly scrape Screener's native CFO/OP row to guarantee an exact match
         native_cfo_op = get_row_series(data["df_cf"][[latest_yr]], "cfo/op")
-        
         if native_cfo_op:
             data["CFO_OP_Ratio"] = native_cfo_op[0]
         else:
-            # Absolute fallback if Screener ever removes the row
             op_matched = get_row_series(data["df_pl"][[latest_yr]], "operating profit") or get_row_series(data["df_pl"][[latest_yr]], "financing profit")
             if cfo_final_matched and op_matched and op_matched[0] != 0:
                 data["CFO_OP_Ratio"] = round((cfo_final_matched[0] / op_matched[0]) * 100, 1)
@@ -828,7 +829,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = ""):
     data["DII_Latest"] = dii_vals[-1] if dii_vals else 0.0
     data["Pledge_Latest"] = pledge_vals[-1] if pledge_vals else 0.0
     
-    # MACRO TREND LOGIC: Looks back 1 year (4 quarters) to bypass single-quarter noise
     def calc_macro_trend(vals):
         if not vals or len(vals) < 2:
             return "Decreasing"
@@ -979,9 +979,14 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
 
-    # 4. VALUATION MULTIPLES
-    pe = safe_float(m.get("Stock P/E"))
-    ind_pe = safe_float(m.get("Industry PE"))
+    # 4. VALUATION MULTIPLES (FLEXIBLE INDUSTRY PE SUPPORT)
+    pe = safe_float(m.get("Stock P/E")) or safe_float(m.get("stockpe"))
+    ind_pe = (
+        safe_float(m.get("Industry PE")) or 
+        safe_float(m.get("Industry P/E")) or 
+        safe_float(m.get("industrype")) or 
+        safe_float(m.get("indpe"))
+    )
     
     if pe is not None and pe > 0:
         if ind_pe is not None and ind_pe > 0:
@@ -1345,13 +1350,12 @@ sidebar.title("EU QUICK FUNDA CHECK")
 sidebar.divider()
 
 with sidebar.form("audit_form"):
-    ticker_input = st.text_input("Enter NSE Ticker", value="TDPOWERSYS").upper()
-    cookie_input = st.text_input("Screener 'sessionid' (Optional)", type="password", help="F12 > Application > Cookies > sessionid")
+    ticker_input = st.text_input("Enter NSE Ticker", value="BSE").upper()
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
 
 if ticker_input:
     with st.spinner(f"Auditing institutional financials for {ticker_input}..."):
-        d = scrape_full_screener(ticker_input, cookie_input)
+        d = scrape_full_screener(ticker_input, SCREENER_SESSION_ID)
         
         df_annual_pe, pe_stats = compute_authentic_historical_pes(
             d["df_pl"] if d else pd.DataFrame(),
@@ -1409,11 +1413,19 @@ if ticker_input:
             use_container_width=True
         )
 
+        ind_pe_display = (
+            d.get('Industry PE') or 
+            d.get('Industry P/E') or 
+            d.get('industrype') or 
+            d.get('indpe') or 
+            'N/A'
+        )
+
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("CMP (Live)", f"₹{format_inr(d.get('Current Price'))}")
         col2.metric("Market Cap", f"₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr")
         col3.metric("Stock P/E", d.get('Stock P/E', 'N/A'))
-        col4.metric("Industry P/E", d.get('Industry PE', 'N/A'))
+        col4.metric("Industry P/E", ind_pe_display)
         col5.metric("Red Flags", f"{red_flags_cnt} High Risk", delta=f"{warnings_cnt} Cautions", delta_color="inverse")
         col6.metric("Audit Score", f"{final_score} / 100", delta=d.get("Archetype"))
         
@@ -1463,7 +1475,7 @@ if ticker_input:
                     return 'background-color: #f8d7da; color: #721c24; font-weight: bold;'
                 return 'color: #555555; font-style: italic;'
 
-            display_table = checklist_df[["Category", "Checklist Metric", "Current Value", "Score", "Status", "Guideline / Benchmark"]]
+            display_table = checklist_df[["Category", "Checklist Metric", "Current Value", "Score", "Status", "Guideline / Benchmark"]].astype(str)
             styled = display_table.style.map(style_status, subset=['Status'])
             st.dataframe(styled, use_container_width=True, hide_index=True)
 
