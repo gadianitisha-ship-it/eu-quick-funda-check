@@ -465,7 +465,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID)
     session = requests.Session()
     session.headers.update(HEADERS)
     
-    # Authenticate directly via cookies and request headers
     if session_cookie:
         session.cookies.update({"sessionid": session_cookie.strip()})
         session.headers.update({"Cookie": f"sessionid={session_cookie.strip()}"})
@@ -557,7 +556,7 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID)
     data["live_announcements"] = documents_list[:6]
     data["live_concalls"] = concall_list[:6]
 
-    # Flexible Ratio Parser
+    # Ratio Parser with Key Normalization
     top_ratios = soup.find('ul', {'id': 'top-ratios'}) or soup.find('div', class_='company-ratios')
     if top_ratios:
         for li in top_ratios.find_all(['li', 'div']):
@@ -571,7 +570,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID)
                 final_val = parsed if parsed is not None else val_clean
                 
                 data[clean_name] = final_val
-                # Store normalized key to avoid case/space mismatches
                 norm_key = re.sub(r'[^a-zA-Z0-9]', '', clean_name).lower()
                 data[norm_key] = final_val
 
@@ -893,12 +891,17 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             "Guideline / Benchmark": guideline
         })
 
-    def get_series(df, row_kw):
+    # Fixed signature to support exclude_kws keyword argument
+    def get_series(df, row_kw, exclude_kws=None):
         if df is None or df.empty:
             return []
+        exclude_kws = exclude_kws or []
         final_res = []
         for idx in df.index:
-            if row_kw.lower() in str(idx).lower():
+            idx_str = str(idx).lower().strip()
+            if row_kw.lower() in idx_str:
+                if any(excl.lower() in idx_str for excl in exclude_kws):
+                    continue
                 res = []
                 for val in df.loc[idx].values:
                     pf = safe_float(val)
