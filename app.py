@@ -10,8 +10,9 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import yfinance as yf
 
-# ----------------- CONFIG -----------------
+# ----------------- AUTHENTICATION & CONFIG -----------------
 LOGO_FILE = "logo.png"
+SCREENER_SESSION_ID = "r3urgq7ycs7bw09j22nffzntc0hd5dl3"
 
 st.set_page_config(
     page_title="EU QUICK FUNDA CHECK",
@@ -420,7 +421,7 @@ def evaluate_forensic_red_flags(d: dict):
 
     return df_flags, red_count, warn_count
 
-# ----------------- LIVE NSE API FEEDS -----------------
+# ----------------- CACHED LIVE FEEDS -----------------
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_live_news(ticker: str):
     news_items = []
@@ -440,10 +441,6 @@ def fetch_live_news(ticker: str):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_nse_live_data(ticker: str):
-    """
-    Connects directly to the National Stock Exchange API to retrieve 
-    the official Sector P/E and live delivery volume statistics.
-    """
     try:
         s = requests.Session()
         s.headers.update({
@@ -452,11 +449,8 @@ def fetch_nse_live_data(ticker: str):
             'Accept-Language': 'en-US,en;q=0.9',
             'Referer': 'https://www.nseindia.com/'
         })
-        
-        # Ping home page to establish required session cookies
         s.get("https://www.nseindia.com", timeout=3.0)
         
-        # Call 1: Fetch Metadata (contains official Sector P/E)
         url_main = f"https://www.nseindia.com/api/quote-equity?symbol={ticker.upper()}"
         res_main = s.get(url_main, timeout=3.0)
         sector_pe = None
@@ -464,7 +458,6 @@ def fetch_nse_live_data(ticker: str):
             meta = res_main.json().get('metadata', {})
             sector_pe = meta.get('pdSectorPe') or meta.get('sectorPe')
             
-        # Call 2: Fetch Trade Info (contains Delivery Volumes)
         url_trade = f"https://www.nseindia.com/api/quote-equity?symbol={ticker.upper()}&section=trade_info"
         res_trade = s.get(url_trade, timeout=3.0)
         sec_data = {}
@@ -481,14 +474,22 @@ def fetch_nse_live_data(ticker: str):
         pass
     return {}
 
-# ----------------- PUBLIC SCRAPER ENGINE -----------------
-@st.cache_data(ttl=3600, show_spinner=False)
-def scrape_full_screener(symbol: str):
+# ----------------- SCRAPER ENGINE -----------------
+@st.cache_data(ttl=600, show_spinner=False)
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 5):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
+    
+    clean_cookie = session_cookie.strip() if session_cookie else ""
+    cookies_dict = {"sessionid": clean_cookie} if clean_cookie else {}
+    
+    if clean_cookie:
+        session.cookies.set("sessionid", clean_cookie, domain=".screener.in", path="/")
+        session.cookies.set("sessionid", clean_cookie, domain="www.screener.in", path="/")
 
     soup = None
+    raw_html = ""
     urls_to_try = [
         f"https://www.screener.in/company/{symbol}/consolidated/",
         f"https://www.screener.in/company/{symbol}/"
@@ -496,11 +497,12 @@ def scrape_full_screener(symbol: str):
 
     for u in urls_to_try:
         try:
-            r = session.get(u, timeout=5.0, allow_redirects=True)
+            r = session.get(u, headers=HEADERS, cookies=cookies_dict, timeout=6.0, allow_redirects=True)
             if r.status_code == 200 and len(r.text) > 1000:
                 temp_soup = BeautifulSoup(r.text, 'html.parser')
                 if temp_soup.find('section', {'id': re.compile(r'profit-loss|income|quarters|quarterly|balance-sheet', re.I)}):
                     soup = temp_soup
+                    raw_html = r.text
                     break
         except Exception:
             continue
@@ -527,11 +529,33 @@ def scrape_full_screener(symbol: str):
     company_id = company_id_match.group(1) if company_id_match else None
     data["Company_ID"] = company_id
 
-    # Peers Table
+    # -------------------------------------------------------------
+    # 1. BULLETPROOF PEERS TABLE EXTRACTION (Direct HTML Parsing)
+    # -------------------------------------------------------------
     data["df_peers"] = pd.DataFrame()
-    if company_id:
+    peers_sec = soup.find('section', {'id': 'peers'})
+    if peers_sec:
+        peer_table = peers_sec.find('table')
+        if peer_table:
+            headers = [th.text.strip() for th in peer_table.find_all('th') if th.text.strip()]
+            p_rows = []
+            for tr in peer_table.find_all('tr')[1:]:
+                tds = tr.find_all(['td', 'th'])
+                if tds:
+                    p_rows.append([td.text.strip().replace('\n', ' ') for td in tds])
+            if p_rows:
+                max_c = max(len(r) for r in p_rows)
+                if len(headers) < max_c:
+                    headers = ["#", "Name"] + headers[1:]
+                df_p = pd.DataFrame(p_rows)
+                if df_p.shape[1] == len(headers):
+                    df_p.columns = headers
+                    data["df_peers"] = df_p
+
+    # Fallback to API if HTML parsing fails
+    if data["df_peers"].empty and company_id:
         try:
-            peer_res = session.get(f"https://www.screener.in/api/company/{company_id}/peers/", timeout=3.5)
+            peer_res = session.get(f"https://www.screener.in/api/company/{company_id}/peers/", headers=HEADERS, cookies=cookies_dict, timeout=4.0)
             if peer_res.status_code == 200:
                 peer_soup = BeautifulSoup(peer_res.text, 'html.parser')
                 peer_table = peer_soup.find('table')
@@ -549,7 +573,7 @@ def scrape_full_screener(symbol: str):
                         df_p = pd.DataFrame(p_rows)
                         if df_p.shape[1] == len(headers):
                             df_p.columns = headers
-                        data["df_peers"] = df_p
+                            data["df_peers"] = df_p
         except Exception:
             pass
 
@@ -575,18 +599,78 @@ def scrape_full_screener(symbol: str):
     data["live_announcements"] = documents_list[:6]
     data["live_concalls"] = concall_list[:6]
 
-    # Quick Top Ratios
-    top_ratios = soup.find('ul', {'id': 'top-ratios'}) or soup.find('div', class_='company-ratios')
-    if top_ratios:
-        for li in top_ratios.find_all(['li', 'div']):
-            name_el = li.find('span', class_='name')
-            val_el = li.find('span', class_='nowrap value') or li.find('span', class_='value')
-            if name_el and val_el:
-                raw_name = name_el.text.strip()
-                clean_name = re.sub(r'\s+', ' ', raw_name)
-                val_clean = val_el.text.replace(',', '').replace('₹', '').strip()
-                parsed = safe_float(val_clean)
-                data[clean_name] = parsed if parsed is not None else val_clean
+    # Ratio Parser: Main Page
+    def extract_ratios_from_soup(target_soup):
+        if not target_soup:
+            return
+        containers = target_soup.find_all(['ul', 'div'], id=re.compile(r'top-ratios|quick-ratios', re.I))
+        if not containers:
+            top_box = target_soup.find('ul', {'id': 'top-ratios'}) or target_soup.find('div', class_='company-ratios')
+            if top_box:
+                containers = [top_box]
+        for container in containers:
+            for li in container.find_all(['li', 'div']):
+                name_el = li.find('span', class_='name')
+                val_el = li.find('span', class_='nowrap value') or li.find('span', class_='value') or li.find('span', class_='number')
+                if name_el and val_el:
+                    raw_name = name_el.get_text(separator=" ", strip=True)
+                    clean_name = re.sub(r'\s+', ' ', raw_name)
+                    val_clean = val_el.get_text(separator=" ", strip=True).replace(',', '').replace('₹', '').strip()
+                    parsed = safe_float(val_clean)
+                    final_val = parsed if parsed is not None else val_clean
+                    
+                    data[clean_name] = final_val
+                    norm_key = re.sub(r'[^a-zA-Z0-9]', '', clean_name).lower()
+                    data[norm_key] = final_val
+
+    extract_ratios_from_soup(soup)
+
+    # Ratio Parser: Internal Quick Ratios API
+    if company_id:
+        try:
+            q_res = session.get(f"https://www.screener.in/api/company/{company_id}/quick_ratios/", headers=HEADERS, cookies=cookies_dict, timeout=4.0)
+            if q_res.status_code == 200 and len(q_res.text) > 10:
+                q_soup = BeautifulSoup(q_res.text, 'html.parser')
+                extract_ratios_from_soup(q_soup)
+        except Exception:
+            pass
+
+    # -------------------------------------------------------------
+    # 2. BULLETPROOF INDUSTRY PE EXTRACTION & FALLBACKS
+    # -------------------------------------------------------------
+    ind_pe = safe_float(data.get("Industry PE")) or safe_float(data.get("industrype"))
+    
+    # Fallback A: Extract directly from raw HTML Regex if missing
+    if not ind_pe:
+        try:
+            match = re.search(r'Industry\s+P/?E[\s\S]*?<span[^>]*value[^>]*>[\s\S]*?([\d\.]+)', raw_html, re.I)
+            if match:
+                ind_pe = safe_float(match.group(1))
+        except:
+            pass
+
+    # Fallback B: Dynamically compute Median from the extracted HTML Peer Table
+    if not ind_pe and not data["df_peers"].empty:
+        df_p = data["df_peers"]
+        # Intelligently find whatever the P/E column is named (PE, P/E, P / E, etc.)
+        pe_col = next((c for c in df_p.columns if "P/E" in c.upper() or "PE" in c.upper() and "PEG" not in c.upper()), None)
+        if pe_col:
+            peer_pes = []
+            for _, row in df_p.iterrows():
+                name_val = str(row.get("Name", "")).lower()
+                hash_val = str(row.get("#", "")).lower()
+                # Exclude the aggregate median row
+                if "median" not in name_val and "median" not in hash_val:
+                    val = safe_float(row[pe_col])
+                    if val and val > 0:
+                        peer_pes.append(val)
+            if peer_pes:
+                ind_pe = round(float(np.median(peer_pes)), 2)
+
+    # Lock the final resolved metric into the dictionary
+    if ind_pe:
+        data["Industry PE"] = ind_pe
+        data["industrype"] = ind_pe
 
     def extract_full_table(section_patterns):
         if isinstance(section_patterns, str):
@@ -995,26 +1079,27 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
 
-    # 4. VALUATION MULTIPLES (NOW ANCHORED TO PUBLIC NSE DATA)
-    pe = safe_float(m.get("Stock P/E"))
-    ind_pe = safe_float(m.get("Industry PE"))
+    # 4. VALUATION MULTIPLES (NOW 100% BULLETPROOF)
+    pe = safe_float(m.get("Stock P/E")) or safe_float(m.get("stockpe"))
+    ind_pe = safe_float(m.get("Industry PE")) or safe_float(m.get("industrype"))
     
     if pe is not None and pe > 0:
         if ind_pe is not None and ind_pe > 0:
             spread = pe - ind_pe
             if spread > 25:
-                add_item("Valuation", "Stock P/E vs Sector P/E (NSE)", f"P/E: {pe} vs Sector P/E: {ind_pe}", 4, 10, "🟡 Caution", "Way above Sector PE / check 10-15 yr PE chart & Mean")
+                add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: {ind_pe}", 4, 10, "🟡 Caution", "Way above Industry PE / check 10-15 yr PE chart & Mean")
             elif spread < -15:
-                add_item("Valuation", "Stock P/E vs Sector P/E (NSE)", f"P/E: {pe} vs Sector P/E: {ind_pe}", 7, 10, "🟡 Caution", "Way below Sector PE / check for value trap")
+                add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: {ind_pe}", 7, 10, "🟡 Caution", "Way below Industry PE / check for value trap")
             else:
-                add_item("Valuation", "Stock P/E vs Sector P/E (NSE)", f"P/E: {pe} vs Sector P/E: {ind_pe}", 10, 10, "🟢 Pass", "Aligned with Sector PE")
+                add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: {ind_pe}", 10, 10, "🟢 Pass", "Aligned with Industry PE")
         else:
+            # If data completely fails to load, explicitly format it as "N/A" so the row never vanishes.
             if pe <= 35:
-                add_item("Valuation", "Stock P/E (TTM)", f"{pe}", 10, 10, "🟢 Pass", "Reasonable valuation multiple")
+                add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: N/A", 10, 10, "🟢 Pass", "Reasonable valuation multiple (Ind PE missing)")
             else:
-                add_item("Valuation", "Stock P/E (TTM)", f"{pe}", 5, 10, "🟡 Caution", "Elevated standalone P/E")
+                add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: N/A", 5, 10, "🟡 Caution", "Elevated standalone P/E (Ind PE missing)")
     else:
-        add_item("Valuation", "Stock P/E (TTM)", "Loss Making / Distressed", 0, 10, "🔴 Fail", "Company has negative earnings (No P/E)")
+        add_item("Valuation", "Stock P/E vs Industry P/E", "Loss Making / Distressed", 0, 10, "🔴 Fail", "Company has negative earnings (No P/E)")
 
     if pe_stats and pe_stats.get("5Y_Median") != "N/A":
         med_5 = pe_stats["5Y_Median"]
@@ -1366,10 +1451,10 @@ with sidebar.form("audit_form"):
 
 if ticker_input:
     with st.spinner(f"Auditing institutional financials for {ticker_input}..."):
-        d = scrape_full_screener(ticker_input)
+        d = scrape_full_screener(ticker_input, SCREENER_SESSION_ID)
         nse_data = fetch_nse_live_data(ticker_input)
         
-        # Override with Official NSE Sector P/E
+        # Override with Official NSE Sector P/E if it miraculously works
         if nse_data and nse_data.get("sector_pe"):
             d["Industry PE"] = safe_float(nse_data["sector_pe"])
         
@@ -1428,13 +1513,13 @@ if ticker_input:
             use_container_width=True
         )
 
-        ind_pe_display = d.get('Industry PE', 'N/A')
+        ind_pe_display = d.get('Industry PE') or d.get('industrype') or 'N/A'
 
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("CMP (Live)", f"₹{format_inr(d.get('Current Price'))}")
         col2.metric("Market Cap", f"₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr")
         col3.metric("Stock P/E", d.get('Stock P/E', 'N/A'))
-        col4.metric("Sector P/E (NSE)", ind_pe_display)
+        col4.metric("Industry P/E", ind_pe_display)
         col5.metric("Red Flags", f"{red_flags_cnt} High Risk", delta=f"{warnings_cnt} Cautions", delta_color="inverse")
         col6.metric("Audit Score", f"{final_score} / 100", delta=d.get("Archetype"))
         
@@ -1445,7 +1530,7 @@ if ticker_input:
         if red_flags_cnt >= 2:
             st.error(f"**CRITICAL FORENSIC ALERT:** {red_flags_cnt} High-Risk accounting or cash-flow red flags detected.")
         elif final_score >= 75:
-            st.success(f"**FINAL VERDICT: STRONG PASS ({final_score}/100)** — Sound fundamentals across balance sheet, cash conversion, and capital returns.")
+            st.success(f"**FINAL Verdict: STRONG PASS ({final_score}/100)** — Sound fundamentals across balance sheet, cash conversion, and capital returns.")
         elif final_score >= 55:
             st.warning(f"**FINAL VERDICT: CONDITIONAL / WATCHLIST ({final_score}/100)** — Moderate profile. Review individual caution flags before entry.")
         else:
