@@ -458,16 +458,19 @@ def fetch_nse_delivery_data(ticker: str):
         pass
     return None
 
-# ----------------- SCRAPER ENGINE -----------------
-@st.cache_data(ttl=3600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID):
+# ----------------- SCRAPER ENGINE (AUTHENTICATED & RESILIENT) -----------------
+@st.cache_data(ttl=600, show_spinner=False)
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 3):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
     
-    if session_cookie:
-        session.cookies.update({"sessionid": session_cookie.strip()})
-        session.headers.update({"Cookie": f"sessionid={session_cookie.strip()}"})
+    clean_cookie = session_cookie.strip() if session_cookie else ""
+    cookies_dict = {"sessionid": clean_cookie} if clean_cookie else {}
+    
+    if clean_cookie:
+        session.cookies.set("sessionid", clean_cookie, domain=".screener.in", path="/")
+        session.cookies.set("sessionid", clean_cookie, domain="www.screener.in", path="/")
 
     soup = None
     urls_to_try = [
@@ -477,11 +480,12 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID)
 
     for u in urls_to_try:
         try:
-            r = session.get(u, timeout=5.0, allow_redirects=True)
+            r = session.get(u, headers=HEADERS, cookies=cookies_dict, timeout=6.0, allow_redirects=True)
             if r.status_code == 200 and len(r.text) > 1000:
                 temp_soup = BeautifulSoup(r.text, 'html.parser')
                 if temp_soup.find('section', {'id': re.compile(r'profit-loss|income|quarters|quarterly|balance-sheet', re.I)}):
                     soup = temp_soup
+                    raw_html = r.text
                     break
         except Exception:
             continue
@@ -512,7 +516,7 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID)
     data["df_peers"] = pd.DataFrame()
     if company_id:
         try:
-            peer_res = session.get(f"https://www.screener.in/api/company/{company_id}/peers/", timeout=3.5)
+            peer_res = session.get(f"https://www.screener.in/api/company/{company_id}/peers/", headers=HEADERS, cookies=cookies_dict, timeout=4.0)
             if peer_res.status_code == 200:
                 peer_soup = BeautifulSoup(peer_res.text, 'html.parser')
                 peer_table = peer_soup.find('table')
@@ -556,22 +560,53 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID)
     data["live_announcements"] = documents_list[:6]
     data["live_concalls"] = concall_list[:6]
 
-    # Ratio Parser with Key Normalization
-    top_ratios = soup.find('ul', {'id': 'top-ratios'}) or soup.find('div', class_='company-ratios')
-    if top_ratios:
-        for li in top_ratios.find_all(['li', 'div']):
-            name_el = li.find('span', class_='name')
-            val_el = li.find('span', class_='nowrap value') or li.find('span', class_='value')
-            if name_el and val_el:
-                raw_name = name_el.text.strip()
-                clean_name = re.sub(r'\s+', ' ', raw_name)
-                val_clean = val_el.text.replace(',', '').replace('₹', '').strip()
-                parsed = safe_float(val_clean)
-                final_val = parsed if parsed is not None else val_clean
-                
-                data[clean_name] = final_val
-                norm_key = re.sub(r'[^a-zA-Z0-9]', '', clean_name).lower()
-                data[norm_key] = final_val
+    # Ratio Parser: Main Page
+    def extract_ratios_from_soup(target_soup):
+        if not target_soup:
+            return
+        containers = target_soup.find_all(['ul', 'div'], id=re.compile(r'top-ratios|quick-ratios', re.I))
+        if not containers:
+            top_box = target_soup.find('ul', {'id': 'top-ratios'}) or target_soup.find('div', class_='company-ratios')
+            if top_box:
+                containers = [top_box]
+        for container in containers:
+            for li in container.find_all(['li', 'div']):
+                name_el = li.find('span', class_='name')
+                val_el = li.find('span', class_='nowrap value') or li.find('span', class_='value') or li.find('span', class_='number')
+                if name_el and val_el:
+                    raw_name = name_el.get_text(separator=" ", strip=True)
+                    clean_name = re.sub(r'\s+', ' ', raw_name)
+                    val_clean = val_el.get_text(separator=" ", strip=True).replace(',', '').replace('₹', '').strip()
+                    parsed = safe_float(val_clean)
+                    final_val = parsed if parsed is not None else val_clean
+                    
+                    data[clean_name] = final_val
+                    norm_key = re.sub(r'[^a-zA-Z0-9]', '', clean_name).lower()
+                    data[norm_key] = final_val
+
+    extract_ratios_from_soup(soup)
+
+    # Ratio Parser: Internal Quick Ratios API
+    if company_id:
+        try:
+            q_res = session.get(f"https://www.screener.in/api/company/{company_id}/quick_ratios/", headers=HEADERS, cookies=cookies_dict, timeout=4.0)
+            if q_res.status_code == 200 and len(q_res.text) > 10:
+                q_soup = BeautifulSoup(q_res.text, 'html.parser')
+                extract_ratios_from_soup(q_soup)
+        except Exception:
+            pass
+
+    # Direct Regex Fallback for Industry PE in Raw HTML
+    if not (data.get("Industry PE") or data.get("industrype")):
+        try:
+            ind_pe_match = re.search(r'Industry\s+P/?E[\s\S]*?<span[^>]*class="[^"]*value[^"]*"[^>]*>[\s\S]*?([\d\.]+)', raw_html, re.I)
+            if ind_pe_match:
+                extracted_pe = safe_float(ind_pe_match.group(1))
+                if extracted_pe:
+                    data["Industry PE"] = extracted_pe
+                    data["industrype"] = extracted_pe
+        except Exception:
+            pass
 
     def extract_full_table(section_patterns):
         if isinstance(section_patterns, str):
@@ -891,7 +926,6 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             "Guideline / Benchmark": guideline
         })
 
-    # Fixed signature to support exclude_kws keyword argument
     def get_series(df, row_kw, exclude_kws=None):
         if df is None or df.empty:
             return []
@@ -982,7 +1016,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
 
-    # 4. VALUATION MULTIPLES (FLEXIBLE INDUSTRY PE SUPPORT)
+    # 4. VALUATION MULTIPLES (FLEXIBLE & RESILIENT INDUSTRY PE RECOVERY)
     pe = safe_float(m.get("Stock P/E")) or safe_float(m.get("stockpe"))
     ind_pe = (
         safe_float(m.get("Industry PE")) or 
