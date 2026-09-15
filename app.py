@@ -789,7 +789,9 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
             data["Employee_Cost_Pct"] = None
     else:
         data["Employee_Cost_Pct"] = None
-    # Pharma Metrics
+   # Pharma Metrics
+    sales_ser = get_row_series(data["df_pl"], "Sales") or get_row_series(data["df_pl"], "Revenue") or get_row_series(data["df_pl"], "Interest Earned")
+    
     mat_ser = get_row_series(data["df_pl"], "Material Cost") or get_row_series(data["df_pl"], "Raw Material")
     if sales_ser and mat_ser and sales_ser[-1] > 0:
         data["Gross_Margin_Pct"] = round(((sales_ser[-1] - mat_ser[-1]) / sales_ser[-1]) * 100, 1)
