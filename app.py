@@ -476,7 +476,7 @@ def fetch_nse_live_data(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 5):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 6):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -530,7 +530,7 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
     data["Company_ID"] = company_id
 
     # -------------------------------------------------------------
-    # 1. BULLETPROOF PEERS TABLE EXTRACTION (Direct HTML Parsing)
+    # 1. BULLETPROOF PEERS TABLE EXTRACTION
     # -------------------------------------------------------------
     data["df_peers"] = pd.DataFrame()
     peers_sec = soup.find('section', {'id': 'peers'})
@@ -552,7 +552,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
                     df_p.columns = headers
                     data["df_peers"] = df_p
 
-    # Fallback to API if HTML parsing fails
     if data["df_peers"].empty and company_id:
         try:
             peer_res = session.get(f"https://www.screener.in/api/company/{company_id}/peers/", headers=HEADERS, cookies=cookies_dict, timeout=4.0)
@@ -599,7 +598,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
     data["live_announcements"] = documents_list[:6]
     data["live_concalls"] = concall_list[:6]
 
-    # Ratio Parser: Main Page
     def extract_ratios_from_soup(target_soup):
         if not target_soup:
             return
@@ -625,7 +623,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
 
     extract_ratios_from_soup(soup)
 
-    # Ratio Parser: Internal Quick Ratios API
     if company_id:
         try:
             q_res = session.get(f"https://www.screener.in/api/company/{company_id}/quick_ratios/", headers=HEADERS, cookies=cookies_dict, timeout=4.0)
@@ -640,7 +637,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
     # -------------------------------------------------------------
     ind_pe = safe_float(data.get("Industry PE")) or safe_float(data.get("industrype"))
     
-    # Fallback A: Extract directly from raw HTML Regex if missing
     if not ind_pe:
         try:
             match = re.search(r'Industry\s+P/?E[\s\S]*?<span[^>]*value[^>]*>[\s\S]*?([\d\.]+)', raw_html, re.I)
@@ -649,17 +645,14 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
         except:
             pass
 
-    # Fallback B: Dynamically compute Median from the extracted HTML Peer Table
     if not ind_pe and not data["df_peers"].empty:
         df_p = data["df_peers"]
-        # Intelligently find whatever the P/E column is named (PE, P/E, P / E, etc.)
         pe_col = next((c for c in df_p.columns if "P/E" in c.upper() or "PE" in c.upper() and "PEG" not in c.upper()), None)
         if pe_col:
             peer_pes = []
             for _, row in df_p.iterrows():
                 name_val = str(row.get("Name", "")).lower()
                 hash_val = str(row.get("#", "")).lower()
-                # Exclude the aggregate median row
                 if "median" not in name_val and "median" not in hash_val:
                     val = safe_float(row[pe_col])
                     if val and val > 0:
@@ -667,7 +660,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
             if peer_pes:
                 ind_pe = round(float(np.median(peer_pes)), 2)
 
-    # Lock the final resolved metric into the dictionary
     if ind_pe:
         data["Industry PE"] = ind_pe
         data["industrype"] = ind_pe
@@ -764,11 +756,9 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
     data["Net_NPA_Val"] = nnpa_val
     data["Net_NPA_Period"] = nnpa_period if nnpa_period else "Latest"
 
-   # IT Employee Cost (Strictly Period-Aligned)
+    # IT Employee Cost
     emp_val, emp_col = get_row_series_and_col(data["df_pl"], "Employee Cost")
-    
     if emp_val is not None and emp_col is not None:
-        # Match Sales from the EXACT same column (e.g., TTM or Mar 2024) to prevent mismatched ratio calculations
         sales_val = None
         for s_kw in ["Sales", "Revenue", "Interest Earned"]:
             for idx in data["df_pl"].index:
@@ -782,16 +772,15 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
                         pass
             if sales_val is not None:
                 break
-                
         if sales_val and sales_val > 0:
             data["Employee_Cost_Pct"] = round((emp_val / sales_val) * 100, 1)
         else:
             data["Employee_Cost_Pct"] = None
     else:
         data["Employee_Cost_Pct"] = None
-   # Pharma Metrics
+
+    # Pharma Metrics
     sales_ser = get_row_series(data["df_pl"], "Sales") or get_row_series(data["df_pl"], "Revenue") or get_row_series(data["df_pl"], "Interest Earned")
-    
     mat_ser = get_row_series(data["df_pl"], "Material Cost") or get_row_series(data["df_pl"], "Raw Material")
     if sales_ser and mat_ser and sales_ser[-1] > 0:
         data["Gross_Margin_Pct"] = round(((sales_ser[-1] - mat_ser[-1]) / sales_ser[-1]) * 100, 1)
@@ -1112,7 +1101,6 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: {ind_pe}", 10, 10, "🟢 Pass", "Aligned with Industry PE")
         else:
-            # If data completely fails to load, explicitly format it as "N/A" so the row never vanishes.
             if pe <= 35:
                 add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: N/A", 10, 10, "🟢 Pass", "Reasonable valuation multiple (Ind PE missing)")
             else:
@@ -1348,7 +1336,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", "1.1%", 4, 5, "🟢 Pass", "Acceptable banking return")
 
-   elif archetype == "IT":
+    elif archetype == "IT":
         emp_pct = safe_float(m.get("Employee_Cost_Pct"))
         if emp_pct is not None:
             if 48.0 <= emp_pct <= 60.0:
@@ -1358,7 +1346,6 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Sector-Specific (IT)", "Employee Cost % of Revenue", f"{emp_pct}%", 3, 10, "🟡 Caution", "Elevated talent bill (> 60% of revenue); margin pressure")
         else:
-            # THIS LOCKS THE ROW IN THE UI IF DATA IS HIDDEN BEHIND JAVASCRIPT
             add_item("Sector-Specific (IT)", "Employee Cost % of Revenue", "N/A (Hidden Schedule)", 0, 10, "ℹ️ Info", "Check manually: Screener hides exact Employee Cost behind the '+' button")
 
         de = safe_float(m.get("Calculated_DE"), 0.0)
@@ -1476,7 +1463,6 @@ if ticker_input:
         d = scrape_full_screener(ticker_input, SCREENER_SESSION_ID)
         nse_data = fetch_nse_live_data(ticker_input)
         
-        # Override with Official NSE Sector P/E if it miraculously works
         if nse_data and nse_data.get("sector_pe"):
             d["Industry PE"] = safe_float(nse_data["sector_pe"])
         
@@ -1552,7 +1538,7 @@ if ticker_input:
         if red_flags_cnt >= 2:
             st.error(f"**CRITICAL FORENSIC ALERT:** {red_flags_cnt} High-Risk accounting or cash-flow red flags detected.")
         elif final_score >= 75:
-            st.success(f"**FINAL Verdict: STRONG PASS ({final_score}/100)** — Sound fundamentals across balance sheet, cash conversion, and capital returns.")
+            st.success(f"**FINAL VERDICT: STRONG PASS ({final_score}/100)** — Sound fundamentals across balance sheet, cash conversion, and capital returns.")
         elif final_score >= 55:
             st.warning(f"**FINAL VERDICT: CONDITIONAL / WATCHLIST ({final_score}/100)** — Moderate profile. Review individual caution flags before entry.")
         else:
