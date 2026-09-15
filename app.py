@@ -101,10 +101,9 @@ def resolve_sector_archetype(sector_desc: str, company_name: str) -> str:
     text = f"{sector_desc} {company_name}".lower()
     if any(k in text for k in ["bank", "nbfc", "housing finance", "financial services", "insurance", "microfinance", "small finance"]):
         return "BFSI"
-    elif any(k in text for k in ["it services", "software", "computers - software", "information technology", "data processing"]):
-        return "IT"
     elif any(k in text for k in ["pharma", "pharmaceutical", "drugs", "healthcare", "biotechnology", "hospital"]):
         return "PHARMA"
+    # IT companies now pass through to the GENERAL archetype for clean checklist scoring
     return "GENERAL"
 
 # ----------------- REAL HISTORICAL PRICE & P/E ENGINE -----------------
@@ -476,7 +475,7 @@ def fetch_nse_live_data(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 6):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 7):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -755,29 +754,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
         nnpa_val, nnpa_period = get_row_series_and_col(data["df_pl"], "Net NPA")
     data["Net_NPA_Val"] = nnpa_val
     data["Net_NPA_Period"] = nnpa_period if nnpa_period else "Latest"
-
-    # IT Employee Cost
-    emp_val, emp_col = get_row_series_and_col(data["df_pl"], "Employee Cost")
-    if emp_val is not None and emp_col is not None:
-        sales_val = None
-        for s_kw in ["Sales", "Revenue", "Interest Earned"]:
-            for idx in data["df_pl"].index:
-                if s_kw.lower() in str(idx).lower().strip():
-                    try:
-                        sv = safe_float(data["df_pl"].loc[idx, emp_col])
-                        if sv is not None:
-                            sales_val = sv
-                            break
-                    except KeyError:
-                        pass
-            if sales_val is not None:
-                break
-        if sales_val and sales_val > 0:
-            data["Employee_Cost_Pct"] = round((emp_val / sales_val) * 100, 1)
-        else:
-            data["Employee_Cost_Pct"] = None
-    else:
-        data["Employee_Cost_Pct"] = None
 
     # Pharma Metrics
     sales_ser = get_row_series(data["df_pl"], "Sales") or get_row_series(data["df_pl"], "Revenue") or get_row_series(data["df_pl"], "Interest Earned")
@@ -1087,7 +1063,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
 
-    # 4. VALUATION MULTIPLES (NOW 100% BULLETPROOF)
+    # 4. VALUATION MULTIPLES
     pe = safe_float(m.get("Stock P/E")) or safe_float(m.get("stockpe"))
     ind_pe = safe_float(m.get("Industry PE")) or safe_float(m.get("industrype"))
     
@@ -1336,24 +1312,6 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", "1.1%", 4, 5, "🟢 Pass", "Acceptable banking return")
 
-    elif archetype == "IT":
-        emp_pct = safe_float(m.get("Employee_Cost_Pct"))
-        if emp_pct is not None:
-            if 48.0 <= emp_pct <= 60.0:
-                add_item("Sector-Specific (IT)", "Employee Cost % of Revenue", f"{emp_pct}%", 10, 10, "🟢 Pass", "Balanced talent cost & margin control (48% - 60%)")
-            elif emp_pct < 48.0:
-                add_item("Sector-Specific (IT)", "Employee Cost % of Revenue", f"{emp_pct}%", 8, 10, "🟢 Pass", "High-margin delivery structure")
-            else:
-                add_item("Sector-Specific (IT)", "Employee Cost % of Revenue", f"{emp_pct}%", 3, 10, "🟡 Caution", "Elevated talent bill (> 60% of revenue); margin pressure")
-        else:
-            add_item("Sector-Specific (IT)", "Employee Cost % of Revenue", "N/A (Hidden Schedule)", 0, 10, "ℹ️ Info", "Check manually: Screener hides exact Employee Cost behind the '+' button")
-
-        de = safe_float(m.get("Calculated_DE"), 0.0)
-        if de <= 0.1:
-            add_item("Sector-Specific (IT)", "Net Cash Reserves Status", "Pristine Net-Cash Balance Sheet", 5, 5, "🟢 Pass", "Zero-debt surplus cash buffer")
-        else:
-            add_item("Sector-Specific (IT)", "Net Cash Reserves Status", f"D/E: {de}", 2, 5, "🟡 Caution", "Unusual debt leverage for technology model")
-
     elif archetype == "PHARMA":
         rd_pct = safe_float(m.get("RD_Cost_Pct"))
         if rd_pct is not None:
@@ -1398,8 +1356,6 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     categories_to_track = ["Solvency & Scale", "Valuation", "Capital Efficiency", "Ownership & Governance"]
     if archetype == "BFSI":
         categories_to_track.append("Sector-Specific (BFSI)")
-    elif archetype == "IT":
-        categories_to_track.append("Sector-Specific (IT)")
     elif archetype == "PHARMA":
         categories_to_track.append("Sector-Specific (Pharma)")
 
