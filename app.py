@@ -764,14 +764,31 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
     data["Net_NPA_Val"] = nnpa_val
     data["Net_NPA_Period"] = nnpa_period if nnpa_period else "Latest"
 
-    # IT Employee Cost
-    sales_ser = get_row_series(data["df_pl"], "Sales") or get_row_series(data["df_pl"], "Revenue") or get_row_series(data["df_pl"], "Interest Earned")
-    emp_ser = get_row_series(data["df_pl"], "Employee Cost")
-    if not emp_ser:
-        emp_ser = get_row_series(data["df_pl"], "Expenses")
-    if sales_ser and emp_ser and sales_ser[-1] > 0:
-        data["Employee_Cost_Pct"] = round((emp_ser[-1] / sales_ser[-1]) * 100, 1)
-
+   # IT Employee Cost (Strictly Period-Aligned)
+    emp_val, emp_col = get_row_series_and_col(data["df_pl"], "Employee Cost")
+    
+    if emp_val is not None and emp_col is not None:
+        # Match Sales from the EXACT same column (e.g., TTM or Mar 2024) to prevent mismatched ratio calculations
+        sales_val = None
+        for s_kw in ["Sales", "Revenue", "Interest Earned"]:
+            for idx in data["df_pl"].index:
+                if s_kw.lower() in str(idx).lower().strip():
+                    try:
+                        sv = safe_float(data["df_pl"].loc[idx, emp_col])
+                        if sv is not None:
+                            sales_val = sv
+                            break
+                    except KeyError:
+                        pass
+            if sales_val is not None:
+                break
+                
+        if sales_val and sales_val > 0:
+            data["Employee_Cost_Pct"] = round((emp_val / sales_val) * 100, 1)
+        else:
+            data["Employee_Cost_Pct"] = None
+    else:
+        data["Employee_Cost_Pct"] = None
     # Pharma Metrics
     mat_ser = get_row_series(data["df_pl"], "Material Cost") or get_row_series(data["df_pl"], "Raw Material")
     if sales_ser and mat_ser and sales_ser[-1] > 0:
