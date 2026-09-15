@@ -1348,7 +1348,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", "1.1%", 4, 5, "🟢 Pass", "Acceptable banking return")
 
-    elif archetype == "IT":
+   elif archetype == "IT":
         emp_pct = safe_float(m.get("Employee_Cost_Pct"))
         if emp_pct is not None:
             if 48.0 <= emp_pct <= 60.0:
@@ -1357,6 +1357,9 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
                 add_item("Sector-Specific (IT)", "Employee Cost % of Revenue", f"{emp_pct}%", 8, 10, "🟢 Pass", "High-margin delivery structure")
             else:
                 add_item("Sector-Specific (IT)", "Employee Cost % of Revenue", f"{emp_pct}%", 3, 10, "🟡 Caution", "Elevated talent bill (> 60% of revenue); margin pressure")
+        else:
+            # THIS LOCKS THE ROW IN THE UI IF DATA IS HIDDEN BEHIND JAVASCRIPT
+            add_item("Sector-Specific (IT)", "Employee Cost % of Revenue", "N/A (Hidden Schedule)", 0, 10, "ℹ️ Info", "Check manually: Screener hides exact Employee Cost behind the '+' button")
 
         de = safe_float(m.get("Calculated_DE"), 0.0)
         if de <= 0.1:
