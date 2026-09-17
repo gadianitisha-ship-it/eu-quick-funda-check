@@ -474,7 +474,7 @@ def fetch_nse_live_data(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 9):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 10):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -1062,7 +1062,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
 
-    # 4. VALUATION MULTIPLES (NOW 100% BULLETPROOF)
+    # 4. VALUATION MULTIPLES
     pe = safe_float(m.get("Stock P/E")) or safe_float(m.get("stockpe"))
     ind_pe = safe_float(m.get("Industry PE")) or safe_float(m.get("industrype"))
     
@@ -1378,6 +1378,29 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     return composite, df, cat_breakdown
 
 # ----------------- EXCEL EXPORT HELPER -----------------
+def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_table=None, df_forensics=None, df_dupont=None):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        checklist_df.to_excel(writer, sheet_name='Scorecard', index=False)
+        extended_matrix_df.to_excel(writer, sheet_name='Extended CAGR Matrix', index=False)
+        if df_pe_table is not None and not df_pe_table.empty:
+            df_pe_table.to_excel(writer, sheet_name='Historical PE Multiples', index=False)
+        if df_forensics is not None and not df_forensics.empty:
+            df_forensics.to_excel(writer, sheet_name='Forensic Red Flags', index=False)
+        if df_dupont is not None and not df_dupont.empty:
+            df_dupont.to_excel(writer, sheet_name='DuPont 3-Stage ROE', index=False)
+        if not d["df_pl"].empty:
+            d["df_pl"].to_excel(writer, sheet_name='Profit & Loss')
+        if not d["df_bs"].empty:
+            d["df_bs"].to_excel(writer, sheet_name='Balance Sheet')
+        if not d["df_cf"].empty:
+            d["df_cf"].to_excel(writer, sheet_name='Cash Flow')
+        if not d["df_quarters"].empty:
+            d["df_quarters"].to_excel(writer, sheet_name='Quarterly Results')
+        if not d["df_shareholding"].empty:
+            d["df_shareholding"].to_excel(writer, sheet_name='Shareholding')
+    return output.getvalue()
+
 # ----------------- HTML TEAR-SHEET EXPORT HELPER -----------------
 def generate_html_tearsheet(symbol, d, checklist_df, final_score):
     html = f"""
@@ -1459,7 +1482,6 @@ def generate_html_tearsheet(symbol, d, checklist_df, final_score):
             row_class = "fail-row"
             status_class = "status-fail"
         
-        # Clean emojis out of the text for a clean, professional PDF look
         clean_status = re.sub(r'[^\w\s/]', '', status).strip()
         
         html += f"""
@@ -1485,28 +1507,6 @@ def generate_html_tearsheet(symbol, d, checklist_df, final_score):
     </html>
     """
     return html
-def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_table=None, df_forensics=None, df_dupont=None):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        checklist_df.to_excel(writer, sheet_name='Scorecard', index=False)
-        extended_matrix_df.to_excel(writer, sheet_name='Extended CAGR Matrix', index=False)
-        if df_pe_table is not None and not df_pe_table.empty:
-            df_pe_table.to_excel(writer, sheet_name='Historical PE Multiples', index=False)
-        if df_forensics is not None and not df_forensics.empty:
-            df_forensics.to_excel(writer, sheet_name='Forensic Red Flags', index=False)
-        if df_dupont is not None and not df_dupont.empty:
-            df_dupont.to_excel(writer, sheet_name='DuPont 3-Stage ROE', index=False)
-        if not d["df_pl"].empty:
-            d["df_pl"].to_excel(writer, sheet_name='Profit & Loss')
-        if not d["df_bs"].empty:
-            d["df_bs"].to_excel(writer, sheet_name='Balance Sheet')
-        if not d["df_cf"].empty:
-            d["df_cf"].to_excel(writer, sheet_name='Cash Flow')
-        if not d["df_quarters"].empty:
-            d["df_quarters"].to_excel(writer, sheet_name='Quarterly Results')
-        if not d["df_shareholding"].empty:
-            d["df_shareholding"].to_excel(writer, sheet_name='Shareholding')
-    return output.getvalue()
 
 # ----------------- UI APPLICATION -----------------
 if os.path.exists(LOGO_FILE):
@@ -1531,7 +1531,6 @@ with sidebar.form("audit_form"):
 if ticker_input:
     with st.spinner(f"Auditing institutional financials for {ticker_input}..."):
         d = scrape_full_screener(ticker_input, SCREENER_SESSION_ID)
-        nse_data = fetch_nse_live_data(ticker_input)
         
         df_annual_pe, pe_stats = compute_authentic_historical_pes(
             d["df_pl"] if d else pd.DataFrame(),
@@ -1577,7 +1576,8 @@ if ticker_input:
             "Stock Price CAGR": d.get("Price_CAGR", {}).get("1 Year", "N/A")
         })
         extended_matrix_df = pd.DataFrame(extended_matrix)
-excel_bytes = generate_excel_report(ticker_input, d, checklist_df, extended_matrix_df, df_annual_pe, df_forensics, df_dupont)
+
+        excel_bytes = generate_excel_report(ticker_input, d, checklist_df, extended_matrix_df, df_annual_pe, df_forensics, df_dupont)
         html_tearsheet = generate_html_tearsheet(ticker_input, d, checklist_df, final_score)
         
         sidebar.divider()
@@ -1594,15 +1594,6 @@ excel_bytes = generate_excel_report(ticker_input, d, checklist_df, extended_matr
             data=html_tearsheet,
             file_name=f"{ticker_input}_Eureka_Scorecard.html",
             mime="text/html",
-            use_container_width=True
-        )
-        excel_bytes = generate_excel_report(ticker_input, d, checklist_df, extended_matrix_df, df_annual_pe, df_forensics, df_dupont)
-        sidebar.divider()
-        sidebar.download_button(
-            label=f"📥 Export {ticker_input} Audit to Excel",
-            data=excel_bytes,
-            file_name=f"{ticker_input}_EU_Funda_Check.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
 
@@ -1823,13 +1814,8 @@ excel_bytes = generate_excel_report(ticker_input, d, checklist_df, extended_matr
 
                 st.divider()
                 st.markdown("### 🚚 Delivery & Volume Absorption (NSE)")
-                if nse_data and nse_data.get('delivery_pct') is not None:
-                    d_pct = nse_data['delivery_pct']
-                    st.metric("Latest NSE Delivery %", f"{d_pct:.1f}%", delta="High Absorption" if d_pct >= 50 else "Normal")
-                    st.write(f"• Delivery Quantity: `{format_inr(nse_data.get('delivery_qty'))}` shares")
-                    st.write(f"• Total Traded Volume: `{format_inr(nse_data.get('traded_qty'))}` shares")
-                else:
-                    st.link_button("📊 Check Live NSE Delivery on Official Page", f"https://www.nseindia.com/get-quotes/equity?symbol={ticker_input}")
+                # NSE Delivery block removed dependency on nse_data to ensure stability
+                st.link_button("📊 Check Live NSE Delivery on Official Page", f"https://www.nseindia.com/get-quotes/equity?symbol={ticker_input}")
 
             with ev_col2:
                 st.markdown("### 🎙️ Earnings Calls & Concall Transcripts")
