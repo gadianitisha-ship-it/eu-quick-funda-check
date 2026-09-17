@@ -476,7 +476,7 @@ def fetch_nse_live_data(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 11):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 12):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -520,7 +520,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
     if peers_section:
         sub_text = peers_section.find('p')
         if sub_text:
-            # Clean up the massive repetitive string formatting from Screener
             sector_txt = re.sub(r'\s+', ' ', sub_text.text.strip())
     data["Sector_Desc"] = sector_txt
     data["Archetype"] = resolve_sector_archetype(sector_txt, data["Company Name"])
@@ -1465,8 +1464,7 @@ def generate_html_tearsheet(symbol, d, checklist_df, final_score):
         <table>
             <thead>
                 <tr>
-                    <th width="15%">Category</th>
-                    <th width="22%">Checklist Metric</th>
+                    <th width="37%">Checklist Metric</th>
                     <th width="15%">Current Value</th>
                     <th width="8%">Pts</th>
                     <th width="12%">Status</th>
@@ -1495,7 +1493,6 @@ def generate_html_tearsheet(symbol, d, checklist_df, final_score):
         
         html += f"""
                 <tr class="{row_class}">
-                    <td style="color: #475569; font-weight: 600;">{row['Category']}</td>
                     <td style="font-weight: 600; color: #1e293b;">{row['Checklist Metric']}</td>
                     <td>{row['Current Value']}</td>
                     <td style="text-align: center; color: #64748b;">{row['Score']}</td>
@@ -1662,7 +1659,7 @@ if ticker_input:
                     return 'background-color: #f8d7da; color: #721c24; font-weight: bold;'
                 return 'color: #555555; font-style: italic;'
 
-            display_table = checklist_df[["Category", "Checklist Metric", "Current Value", "Score", "Status", "Guideline / Benchmark"]].astype(str)
+            display_table = checklist_df[["Checklist Metric", "Current Value", "Score", "Status", "Guideline / Benchmark"]].astype(str)
             styled = display_table.style.map(style_status, subset=['Status'])
             st.dataframe(styled, use_container_width=True, hide_index=True)
 
@@ -1823,7 +1820,6 @@ if ticker_input:
 
                 st.divider()
                 st.markdown("### 🚚 Delivery & Volume Absorption (NSE)")
-                # NSE Delivery block removed dependency on nse_data to ensure stability
                 st.link_button("📊 Check Live NSE Delivery on Official Page", f"https://www.nseindia.com/get-quotes/equity?symbol={ticker_input}")
 
             with ev_col2:
