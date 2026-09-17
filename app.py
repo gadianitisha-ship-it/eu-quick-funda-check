@@ -101,6 +101,8 @@ def resolve_sector_archetype(sector_desc: str, company_name: str) -> str:
     text = f"{sector_desc} {company_name}".lower()
     if any(k in text for k in ["bank", "nbfc", "housing finance", "financial services", "insurance", "microfinance", "small finance"]):
         return "BFSI"
+    elif any(k in text for k in ["it services", "software", "computers - software", "information technology", "data processing"]):
+        return "IT"
     elif any(k in text for k in ["pharma", "pharmaceutical", "drugs", "healthcare", "biotechnology", "hospital"]):
         return "PHARMA"
     return "GENERAL"
@@ -474,7 +476,7 @@ def fetch_nse_live_data(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 10):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 11):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -518,7 +520,8 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
     if peers_section:
         sub_text = peers_section.find('p')
         if sub_text:
-            sector_txt = sub_text.text.strip()
+            # Clean up the massive repetitive string formatting from Screener
+            sector_txt = re.sub(r'\s+', ' ', sub_text.text.strip())
     data["Sector_Desc"] = sector_txt
     data["Archetype"] = resolve_sector_archetype(sector_txt, data["Company Name"])
     data["is_bfsi"] = (data["Archetype"] == "BFSI")
@@ -1076,10 +1079,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: {ind_pe}", 10, 10, "🟢 Pass", "Aligned with Industry PE")
         else:
-            if pe <= 35:
-                add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: N/A", 10, 10, "🟢 Pass", "Reasonable valuation multiple (Ind PE missing)")
-            else:
-                add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: N/A", 5, 10, "🟡 Caution", "Elevated standalone P/E (Ind PE missing)")
+            add_item("Valuation", "Stock P/E vs Industry P/E", f"P/E: {pe} vs Ind P/E: N/A", 0, 0, "ℹ️ Info", "Industry P/E data unavailable")
     else:
         add_item("Valuation", "Stock P/E vs Industry P/E", "Loss Making / Distressed", 0, 10, "🔴 Fail", "Company has negative earnings (No P/E)")
 
@@ -1319,6 +1319,13 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
+    elif archetype == "IT":
+        de = safe_float(m.get("Calculated_DE"), 0.0)
+        if de <= 0.1:
+            add_item("Sector-Specific (IT)", "Net Cash Reserves Status", "Pristine Net-Cash Balance Sheet", 5, 5, "🟢 Pass", "Zero-debt surplus cash buffer")
+        else:
+            add_item("Sector-Specific (IT)", "Net Cash Reserves Status", f"D/E: {de}", 2, 5, "🟡 Caution", "Unusual debt leverage for technology model")
+
     elif archetype == "PHARMA":
         rd_pct = safe_float(m.get("RD_Cost_Pct"))
         if rd_pct is not None:
@@ -1363,6 +1370,8 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     categories_to_track = ["Solvency & Scale", "Valuation", "Capital Efficiency", "Ownership & Governance"]
     if archetype == "BFSI":
         categories_to_track.append("Sector-Specific (BFSI)")
+    elif archetype == "IT":
+        categories_to_track.append("Sector-Specific (IT)")
     elif archetype == "PHARMA":
         categories_to_track.append("Sector-Specific (Pharma)")
 
