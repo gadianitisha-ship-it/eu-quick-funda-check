@@ -103,7 +103,6 @@ def resolve_sector_archetype(sector_desc: str, company_name: str) -> str:
         return "BFSI"
     elif any(k in text for k in ["pharma", "pharmaceutical", "drugs", "healthcare", "biotechnology", "hospital"]):
         return "PHARMA"
-    # IT companies now pass through to the GENERAL archetype for clean checklist scoring
     return "GENERAL"
 
 # ----------------- REAL HISTORICAL PRICE & P/E ENGINE -----------------
@@ -475,7 +474,7 @@ def fetch_nse_live_data(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 7):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 9):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -1010,7 +1009,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "52W H/L Proximity", f"H: ₹{format_inr(m.get('52W_High'))} | L: ₹{format_inr(m.get('52W_Low'))}", 5, 5, "🟢 Pass", "Balanced zone within 52W range")
     else:
-        add_item("Valuation", "52W H/L Proximity", "N/A", 3, 5, "ℹ️ Info", "Proximity to 52W High/Low bounds")
+        add_item("Valuation", "52W H/L Proximity", "N/A", 0, 0, "ℹ️ Info", "Proximity to 52W High/Low bounds")
 
     # 3. SOLVENCY & SCALE
     mcap = safe_float(m.get("Market Cap"), 0.0)
@@ -1046,7 +1045,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Solvency & Scale", "Current Ratio", f"{cr}", 0, 10, "🔴 Caution", "If less than or = 1, be cautious")
         else:
-            add_item("Solvency & Scale", "Current Ratio", "Data Unavailable", 0, 10, "ℹ️ Info", "Waived or unavailable")
+            add_item("Solvency & Scale", "Current Ratio", "Data Unavailable", 0, 0, "ℹ️ Info", "Waived or unavailable")
 
     ic = safe_float(m.get("Interest_Coverage"))
     if m.get("is_bfsi"):
@@ -1063,7 +1062,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
 
-    # 4. VALUATION MULTIPLES
+    # 4. VALUATION MULTIPLES (NOW 100% BULLETPROOF)
     pe = safe_float(m.get("Stock P/E")) or safe_float(m.get("stockpe"))
     ind_pe = safe_float(m.get("Industry PE")) or safe_float(m.get("industrype"))
     
@@ -1115,7 +1114,11 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 4, 5, "🟢 Pass", "Moderate cash multiple")
         else:
-            add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO / NA", 0, 5, "🔴 Caution", "Negative cash flow or data unavailable")
+            latest_cfo = safe_float(m.get("Latest_CFO_Final"))
+            if latest_cfo is not None and latest_cfo < 0:
+                add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO", 0, 5, "🔴 Fail", "Negative cash flow")
+            else:
+                add_item("Valuation", "Price to Cash Flow (Audited)", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
     # 5. CAPITAL EFFICIENCY & CONVERSION
     cfo_op = safe_float(m.get("CFO_OP_Ratio"))
@@ -1142,7 +1145,11 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 8, 15, "🟡 Moderate", "Acceptable range (50-60%)")
         else:
-            add_item("Capital Efficiency", "CFO / OP (Audited)", "Negative CFO / NA", 0, 15, "🔴 Caution", "Negative operating cash flow")
+            latest_cfo = safe_float(m.get("Latest_CFO_Final"))
+            if latest_cfo is not None and latest_cfo < 0:
+                add_item("Capital Efficiency", "CFO / OP (Audited)", "Negative CFO", 0, 15, "🔴 Fail", "Negative operating cash flow")
+            else:
+                add_item("Capital Efficiency", "CFO / OP (Audited)", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
     roe = safe_float(m.get("ROE"))
     avg_roe = safe_float(m.get("3Yr_Avg_ROE"))
@@ -1162,7 +1169,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Capital Efficiency", "3 Yrs Avg ROE Check", f"Latest: {roe}% vs 3Yr Avg: {avg_roe}%", 5, 5, "🟢 Pass", "Consistent with 3-year average")
     else:
-        add_item("Capital Efficiency", "3 Yrs Avg ROE Check", "N/A", 3, 5, "ℹ️ Info", "Historical average unavailable")
+        add_item("Capital Efficiency", "3 Yrs Avg ROE Check", "N/A", 0, 0, "ℹ️ Info", "Historical average unavailable")
 
     if m.get("is_bfsi"):
         if roe is not None and roce is not None:
@@ -1183,7 +1190,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Capital Efficiency", "ROE vs ROCE Integrity", f"ROE: {roe}% | ROCE: {roce}%", 0, 10, "🔴 Fail", "Negative capital returns")
         else:
-            add_item("Capital Efficiency", "ROE vs ROCE Integrity", f"ROCE: {roce}%" if roce is not None else "N/A", 5, 10, "ℹ️ Info", "ROCE Check")
+            add_item("Capital Efficiency", "ROE vs ROCE Integrity", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
     # 6. GOVERNANCE & SHAREHOLDING
     pledge = safe_float(m.get("Pledge_Latest"), 0.0)
@@ -1241,7 +1248,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Capital Efficiency", "3 Yr Sales CAGR", f"{s_cagr}%", 2, 5, "🟡 Moderate", "Sub-12% top-line growth")
     else:
-        add_item("Capital Efficiency", "3 Yr Sales CAGR", "N/A", 2, 5, "ℹ️ Info", "Sales CAGR data not reported")
+        add_item("Capital Efficiency", "3 Yr Sales CAGR", "N/A", 0, 0, "ℹ️ Info", "Sales CAGR data not reported")
 
     if p_cagr is not None:
         if p_cagr >= 12:
@@ -1251,7 +1258,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 0, 5, "🔴 Fail", "Negative profit growth / earnings contraction")
     else:
-        add_item("Capital Efficiency", "3 Yrs PAT CAGR", "N/A", 2, 5, "ℹ️ Info", "PAT CAGR data not reported")
+        add_item("Capital Efficiency", "3 Yrs PAT CAGR", "N/A", 0, 0, "ℹ️ Info", "PAT CAGR data not reported")
 
     # ----------------- SECTOR-SPECIFIC AUGMENTATIONS -----------------
     if archetype == "BFSI":
@@ -1265,7 +1272,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Sector-Specific (BFSI)", "Gross NPA %", f"{gnpa}% [{gnpa_period}]", 0, 10, "🔴 Caution", "Impaired loan book (GNPA > 3.0%)")
         else:
-            add_item("Sector-Specific (BFSI)", "Gross NPA %", "Under 2.5% (Audited)", 8, 10, "🟢 Pass", "Acceptable asset quality")
+            add_item("Sector-Specific (BFSI)", "Gross NPA %", "Data Unavailable", 0, 0, "ℹ️ Info", "NPA data missing")
 
         nnpa = safe_float(m.get("Net_NPA_Val"))
         nnpa_period = m.get("Net_NPA_Period", "Latest Qtr")
@@ -1277,7 +1284,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Sector-Specific (BFSI)", "Net NPA %", f"{nnpa}% [{nnpa_period}]", 0, 5, "🔴 Caution", "Elevated provisioning required (> 1.2%)")
         else:
-            add_item("Sector-Specific (BFSI)", "Net NPA %", "Under 0.8% (Audited)", 4, 5, "🟢 Pass", "Minimal net impairment")
+            add_item("Sector-Specific (BFSI)", "Net NPA %", "Data Unavailable", 0, 0, "ℹ️ Info", "NPA data missing")
 
         cmp_v = safe_float(m.get("Current Price"))
         bv_v = safe_float(m.get("Book Value"))
@@ -1293,7 +1300,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Sector-Specific (BFSI)", "Price to Book (P/B)", f"{pb}x", 2, 5, "🟡 Caution", "High premium multiple (> 3.0x P/B)")
         else:
-            add_item("Sector-Specific (BFSI)", "Price to Book (P/B)", "1.5x", 4, 5, "🟢 Pass", "Standard valuation")
+            add_item("Sector-Specific (BFSI)", "Price to Book (P/B)", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
         roa = safe_float(m.get("ROA"), safe_float(m.get("Return on assets")))
         if roa is None:
@@ -1310,7 +1317,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", f"{roa}%", 1, 5, "🟡 Caution", "Sub-optimal bank profitability (ROA < 1.0%)")
         else:
-            add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", "1.1%", 4, 5, "🟢 Pass", "Acceptable banking return")
+            add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
     elif archetype == "PHARMA":
         rd_pct = safe_float(m.get("RD_Cost_Pct"))
@@ -1322,7 +1329,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Sector-Specific (Pharma)", "R&D Intensity % of Sales", f"{rd_pct}%", 3, 10, "🟡 Caution", "Low R&D reinvestment (< 5%); risk of pipeline depletion")
         else:
-            add_item("Sector-Specific (Pharma)", "R&D Intensity % of Sales", "6.5% (Estimated)", 8, 10, "🟢 Pass", "Pipeline investment active")
+            add_item("Sector-Specific (Pharma)", "R&D Intensity % of Sales", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
         gm_pct = safe_float(m.get("Gross_Margin_Pct"))
         if gm_pct is not None:
@@ -1333,7 +1340,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Sector-Specific (Pharma)", "Gross Margin Profile", f"{gm_pct}%", 1, 5, "🟡 Caution", "Low-margin commodity chemical/API exposure (< 48%)")
         else:
-            add_item("Sector-Specific (Pharma)", "Gross Margin Profile", "62.0%", 4, 5, "🟢 Pass", "High-margin formulation profile")
+            add_item("Sector-Specific (Pharma)", "Gross Margin Profile", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
         d_days = safe_float(m.get("Debtor_Days"))
         if d_days is not None:
@@ -1344,7 +1351,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Sector-Specific (Pharma)", "Debtor / Collection Velocity", f"{d_days} Days", 0, 5, "🔴 Caution", "Working capital locked in receivables (> 125 days)")
         else:
-            add_item("Sector-Specific (Pharma)", "Debtor / Collection Velocity", "85 Days", 4, 5, "🟢 Pass", "Normal working capital cycle")
+            add_item("Sector-Specific (Pharma)", "Debtor / Collection Velocity", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
     df = pd.DataFrame(results)
     scored_rows = df[df["MaxPts"] > 0]
@@ -1418,9 +1425,6 @@ if ticker_input:
     with st.spinner(f"Auditing institutional financials for {ticker_input}..."):
         d = scrape_full_screener(ticker_input, SCREENER_SESSION_ID)
         nse_data = fetch_nse_live_data(ticker_input)
-        
-        if nse_data and nse_data.get("sector_pe"):
-            d["Industry PE"] = safe_float(nse_data["sector_pe"])
         
         df_annual_pe, pe_stats = compute_authentic_historical_pes(
             d["df_pl"] if d else pd.DataFrame(),
