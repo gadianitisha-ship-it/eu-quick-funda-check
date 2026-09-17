@@ -1577,7 +1577,25 @@ if ticker_input:
             "Stock Price CAGR": d.get("Price_CAGR", {}).get("1 Year", "N/A")
         })
         extended_matrix_df = pd.DataFrame(extended_matrix)
-
+excel_bytes = generate_excel_report(ticker_input, d, checklist_df, extended_matrix_df, df_annual_pe, df_forensics, df_dupont)
+        html_tearsheet = generate_html_tearsheet(ticker_input, d, checklist_df, final_score)
+        
+        sidebar.divider()
+        sidebar.download_button(
+            label=f"📥 Export {ticker_input} Audit to Excel",
+            data=excel_bytes,
+            file_name=f"{ticker_input}_EU_Funda_Check.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+        
+        sidebar.download_button(
+            label=f"📄 Download Printable PDF Report",
+            data=html_tearsheet,
+            file_name=f"{ticker_input}_Eureka_Scorecard.html",
+            mime="text/html",
+            use_container_width=True
+        )
         excel_bytes = generate_excel_report(ticker_input, d, checklist_df, extended_matrix_df, df_annual_pe, df_forensics, df_dupont)
         sidebar.divider()
         sidebar.download_button(
