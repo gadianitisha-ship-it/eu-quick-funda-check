@@ -1378,6 +1378,113 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     return composite, df, cat_breakdown
 
 # ----------------- EXCEL EXPORT HELPER -----------------
+# ----------------- HTML TEAR-SHEET EXPORT HELPER -----------------
+def generate_html_tearsheet(symbol, d, checklist_df, final_score):
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>{symbol} - EU Quick Funda Scorecard</title>
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 40px; color: #2d3748; }}
+            .header {{ border-bottom: 3px solid #1a365d; padding-bottom: 15px; margin-bottom: 25px; }}
+            .logo-text {{ font-size: 26px; font-weight: 800; color: #1a365d; letter-spacing: 1px; }}
+            .sub-text {{ font-size: 14px; color: #718096; float: right; margin-top: 10px; font-weight: 600; text-transform: uppercase; }}
+            .title-section {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }}
+            .company-name {{ font-size: 32px; font-weight: 800; color: #111827; margin: 0; }}
+            .score-box {{ background: #f8fafc; border: 2px solid #e2e8f0; padding: 15px 30px; border-radius: 8px; text-align: center; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }}
+            .score-value {{ font-size: 36px; font-weight: 900; color: #1a365d; }}
+            table {{ width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1); }}
+            th {{ background-color: #1a365d; color: #ffffff; padding: 12px; text-align: left; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border: 1px solid #1a365d; }}
+            td {{ padding: 10px 12px; border: 1px solid #e2e8f0; vertical-align: middle; }}
+            .pass-row {{ background-color: #f0fdf4; }}
+            .caution-row {{ background-color: #fefce8; }}
+            .fail-row {{ background-color: #fef2f2; }}
+            .info-row {{ background-color: #ffffff; }}
+            .status-pass {{ color: #166534; font-weight: bold; }}
+            .status-caution {{ color: #b45309; font-weight: bold; }}
+            .status-fail {{ color: #991b1b; font-weight: bold; }}
+            .status-info {{ color: #475569; font-style: italic; }}
+            .footer {{ margin-top: 40px; font-size: 11px; color: #a0aec0; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 15px; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <span class="logo-text">EUREKA RESEARCH</span>
+            <span class="sub-text">Quantitative Funda Scorecard</span>
+        </div>
+        
+        <div class="title-section">
+            <div>
+                <h1 class="company-name">{d.get('Company Name', symbol)} ({symbol})</h1>
+                <p style="margin: 8px 0; color: #4a5568; font-size: 15px;">
+                    Model: <b>{d.get('Archetype', 'GENERAL')} Sector</b> &nbsp;|&nbsp; 
+                    Live CMP: <b>₹{format_inr(d.get('Current Price'))}</b> &nbsp;|&nbsp; 
+                    Market Cap: <b>₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr</b>
+                </p>
+            </div>
+            <div class="score-box">
+                <div style="font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #64748b; font-weight: 700;">Audit Score</div>
+                <div class="score-value">{final_score}<span style="font-size:20px; color:#94a3b8;">/100</span></div>
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th width="15%">Category</th>
+                    <th width="22%">Checklist Metric</th>
+                    <th width="15%">Current Value</th>
+                    <th width="8%">Pts</th>
+                    <th width="12%">Status</th>
+                    <th width="28%">Benchmark Guideline</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
+    
+    for _, row in checklist_df.iterrows():
+        status = str(row['Status'])
+        row_class = "info-row"
+        status_class = "status-info"
+        
+        if "Pass" in status:
+            row_class = "pass-row"
+            status_class = "status-pass"
+        elif "Caution" in status or "Moderate" in status:
+            row_class = "caution-row"
+            status_class = "status-caution"
+        elif "Fail" in status:
+            row_class = "fail-row"
+            status_class = "status-fail"
+        
+        # Clean emojis out of the text for a clean, professional PDF look
+        clean_status = re.sub(r'[^\w\s/]', '', status).strip()
+        
+        html += f"""
+                <tr class="{row_class}">
+                    <td style="color: #475569; font-weight: 600;">{row['Category']}</td>
+                    <td style="font-weight: 600; color: #1e293b;">{row['Checklist Metric']}</td>
+                    <td>{row['Current Value']}</td>
+                    <td style="text-align: center; color: #64748b;">{row['Score']}</td>
+                    <td class="{status_class}">{clean_status}</td>
+                    <td style="color: #64748b;">{row['Guideline / Benchmark']}</td>
+                </tr>
+        """
+
+    html += f"""
+            </tbody>
+        </table>
+        
+        <div class="footer">
+            Generated automatically by EU Quick Funda Check.<br>
+            <i>Data extracted from public filings. To be used as a supplementary quantitative summary.</i>
+        </div>
+    </body>
+    </html>
+    """
+    return html
 def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_table=None, df_forensics=None, df_dupont=None):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
