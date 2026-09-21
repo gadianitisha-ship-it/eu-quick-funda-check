@@ -476,7 +476,7 @@ def fetch_nse_live_data(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 12):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 13):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -1625,13 +1625,6 @@ if ticker_input:
             st.warning(f"**FINAL VERDICT: CONDITIONAL / WATCHLIST ({final_score}/100)** — Moderate profile. Review individual caution flags before entry.")
         else:
             st.error(f"**FINAL VERDICT: AVOID / HIGH CAUTION ({final_score}/100)** — Critical structural, leverage, or liquidity red flags detected.")
-
-        st.markdown("#### 🎯 Score Breakdown by Category")
-        pb_cols = st.columns(len(cat_scores) if cat_scores else 4)
-        for idx_cat, (cat_name, c_val) in enumerate(cat_scores.items()):
-            with pb_cols[idx_cat]:
-                st.write(f"**{cat_name}**: {c_val['earned']}/{c_val['max']} pts")
-                st.progress(c_val["pct"])
 
         st.divider()
 
