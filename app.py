@@ -101,7 +101,7 @@ def resolve_sector_archetype(sector_desc: str, company_name: str) -> str:
     text = f"{sector_desc} {company_name}".lower()
     if any(k in text for k in ["bank", "nbfc", "housing finance", "financial services", "insurance", "microfinance", "small finance"]):
         return "BFSI"
-    elif any(k in text for k in ["it services", "software", "computers - software", "information technology", "data processing"]):
+    elif any(k in text for k in ["it services", "software", "computers - software", "information technology", "data processing", "technology"]):
         return "IT"
     elif any(k in text for k in ["pharma", "pharmaceutical", "drugs", "healthcare", "biotechnology", "hospital"]):
         return "PHARMA"
@@ -441,7 +441,7 @@ def fetch_live_news(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 15):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 17):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -478,12 +478,18 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
     title_tag = soup.find('h1')
     data["Company Name"] = title_tag.text.strip() if title_tag else symbol
     
+    # Clean Sector Description
     peers_section = soup.find('section', {'id': 'peers'})
     sector_txt = ""
     if peers_section:
         sub_text = peers_section.find('p')
         if sub_text:
-            sector_txt = re.sub(r'\s+', ' ', sub_text.text.strip())
+            links = sub_text.find_all('a')
+            if len(links) >= 2:
+                # Extracts specifically "Information Technology | Computers - Software" without repetition
+                sector_txt = f"{links[0].text.strip()} | {links[1].text.strip()}"
+            else:
+                sector_txt = re.sub(r'\s+', ' ', sub_text.text.strip())
     data["Sector_Desc"] = sector_txt
     data["Archetype"] = resolve_sector_archetype(sector_txt, data["Company Name"])
     data["is_bfsi"] = (data["Archetype"] == "BFSI")
@@ -921,20 +927,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     add_item("Overview", "Face Value", f"₹{m.get('Face Value', 'N/A')}", 0, 0, "ℹ️ Info", "Nominal Share Par Value")
     add_item("Overview", "Dividend Yield (TTM)", f"{m.get('Dividend Yield', 0.0)}%", 0, 0, "ℹ️ Info", "For Info (Low does not necessarily mean Bad)")
 
-    # 2. 52-WEEK HIGH / LOW PROXIMITY (5 Pts)
-    dist_h = safe_float(m.get("Dist_High_Pct"))
-    dist_l = safe_float(m.get("Dist_Low_Pct"))
-    if dist_h is not None and dist_l is not None:
-        if dist_h <= 2.5:
-            add_item("Valuation", "52W H/L Proximity", f"{dist_h}% below 52W High", 3, 5, "🟡 Caution", "CMP very close to 52H — Treat with caution")
-        elif dist_l <= 4.0:
-            add_item("Valuation", "52W H/L Proximity", f"{dist_l}% above 52W Low", 1, 5, "🔴 Caution", "CMP very close to 52W Low — Treat with caution")
-        else:
-            add_item("Valuation", "52W H/L Proximity", f"H: ₹{format_inr(m.get('52W_High'))} | L: ₹{format_inr(m.get('52W_Low'))}", 5, 5, "🟢 Pass", "Balanced zone within 52W range")
-    else:
-        add_item("Valuation", "52W H/L Proximity", "N/A", 0, 0, "ℹ️ Info", "Proximity to 52W High/Low bounds")
-
-    # 3. SOLVENCY & SCALE (40 Pts Total)
+    # 2. SOLVENCY & SCALE (40 Pts Total)
     mcap = safe_float(m.get("Market Cap"), 0.0)
     if mcap >= 1000:
         add_item("Solvency & Scale", "Market Cap", f"₹{format_inr(mcap)} Cr", 10, 10, "🟢 Pass", "Above ₹1,000 Cr liquidity filter")
@@ -985,7 +978,25 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
 
-    # 4. VALUATION (20 Pts Total — Reallocated to Own Historical Baselines)
+    # 3. VALUATION (25 Pts Total — Reallocated to Own Historical Baselines)
+    dist_h = safe_float(m.get("Dist_High_Pct"))
+    dist_l = safe_float(m.get("Dist_Low_Pct"))
+    if dist_h is not None and dist_l is not None:
+        if dist_h <= 2.5:
+            add_item("Valuation", "52W H/L Proximity", f"{dist_h}% below 52W High", 3, 5, "🟡 Caution", "CMP very close to 52H — Treat with caution")
+        elif dist_l <= 4.0:
+            add_item("Valuation", "52W H/L Proximity", f"{dist_l}% above 52W Low", 1, 5, "🔴 Caution", "CMP very close to 52W Low — Treat with caution")
+        else:
+            add_item("Valuation", "52W H/L Proximity", f"H: ₹{format_inr(m.get('52W_High'))} | L: ₹{format_inr(m.get('52W_Low'))}", 5, 5, "🟢 Pass", "Balanced zone within 52W range")
+    else:
+        add_item("Valuation", "52W H/L Proximity", "N/A", 0, 0, "ℹ️ Info", "Proximity to 52W High/Low bounds")
+
+    pe = safe_float(m.get("Stock P/E")) or safe_float(m.get("stockpe"))
+    if pe is not None and pe > 0:
+        add_item("Valuation", "Stock P/E (TTM)", f"{pe}x", 0, 0, "ℹ️ Info", "Reported Trailing Price-to-Earnings Multiple")
+    else:
+        add_item("Valuation", "Stock P/E (TTM)", "Loss / Distressed", 0, 0, "🔴 Fail", "Company has negative earnings (No P/E)")
+
     if pe_stats and pe_stats.get("5Y_Median") != "N/A":
         med_5 = pe_stats["5Y_Median"]
         curr_p = pe_stats["Current_PE"]
@@ -1025,7 +1036,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Valuation", "Price to Cash Flow (Audited)", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
-    # 5. CAPITAL EFFICIENCY & CONVERSION (50 Pts Total)
+    # 4. CAPITAL EFFICIENCY & CONVERSION (50 Pts Total)
     cfo_op = safe_float(m.get("CFO_OP_Ratio"))
     cfo_period = m.get("CFO_OP_Period", "")
     period_label = f" [{cfo_period}]" if cfo_period and cfo_period != "N/A" else ""
@@ -1117,7 +1128,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     else:
         add_item("Capital Efficiency", "3 Yrs PAT CAGR", "N/A", 0, 0, "ℹ️ Info", "PAT CAGR data not reported")
 
-    # 6. GOVERNANCE & SHAREHOLDING (25 Pts Total)
+    # 5. GOVERNANCE & SHAREHOLDING (25 Pts Total)
     pledge = safe_float(m.get("Pledge_Latest"), 0.0)
     if pledge == 0:
         add_item("Ownership & Governance", "Prom. Pledge", "0.0%", 10, 10, "🟢 Pass", "Zero is preferred")
@@ -1162,7 +1173,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     else:
         add_item("Ownership & Governance", "Promoter Holding (1-Yr Trend)", f"{prom_val}% [{prom_hist}]", 3, 5, "🟡 Caution", "Promoter holding declined over the trailing year")
 
-    # 7. SECTOR-SPECIFIC AUGMENTATIONS
+    # 6. SECTOR-SPECIFIC AUGMENTATIONS
     if archetype == "BFSI":
         gnpa = safe_float(m.get("Gross_NPA_Val"))
         gnpa_period = m.get("Gross_NPA_Period", "Latest Qtr")
