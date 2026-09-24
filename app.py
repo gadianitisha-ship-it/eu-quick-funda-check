@@ -1325,93 +1325,122 @@ def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_tab
 
 # ----------------- HTML TEAR-SHEET EXPORT HELPER -----------------
 def generate_html_tearsheet(symbol, d, checklist_df, final_score):
+    report_date = datetime.now().strftime("%d %B %Y")
+    
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <meta charset="UTF-8">
-        <title>{symbol} - EU Quick Funda Scorecard</title>
+        <title>{symbol} - Eureka Funda Scorecard</title>
         <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 40px; color: #2d3748; }}
-            .header {{ border-bottom: 3px solid #1a365d; padding-bottom: 15px; margin-bottom: 25px; }}
-            .logo-text {{ font-size: 26px; font-weight: 800; color: #1a365d; letter-spacing: 1px; }}
-            .sub-text {{ font-size: 14px; color: #718096; float: right; margin-top: 10px; font-weight: 600; text-transform: uppercase; }}
-            .title-section {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }}
-            .company-name {{ font-size: 32px; font-weight: 800; color: #111827; margin: 0; }}
-            .score-box {{ background: #f8fafc; border: 2px solid #e2e8f0; padding: 15px 30px; border-radius: 8px; text-align: center; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }}
-            .score-value {{ font-size: 36px; font-weight: 900; color: #1a365d; }}
-            table {{ width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1); }}
-            th {{ background-color: #1a365d; color: #ffffff; padding: 12px; text-align: left; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border: 1px solid #1a365d; }}
-            td {{ padding: 10px 12px; border: 1px solid #e2e8f0; vertical-align: middle; }}
-            .pass-row {{ background-color: #f0fdf4; }}
-            .caution-row {{ background-color: #fefce8; }}
-            .fail-row {{ background-color: #fef2f2; }}
-            .info-row {{ background-color: #ffffff; }}
-            .status-pass {{ color: #166534; font-weight: bold; }}
-            .status-caution {{ color: #b45309; font-weight: bold; }}
-            .status-fail {{ color: #991b1b; font-weight: bold; }}
-            .status-info {{ color: #475569; font-style: italic; }}
-            .footer {{ margin-top: 40px; font-size: 11px; color: #a0aec0; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 15px; }}
+            @page {{ size: A4; margin: 15mm; }}
+            body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; margin: 0; padding: 20px; color: #222; background: #fff; line-height: 1.4; }}
+            
+            /* Eureka Header Branding */
+            .header {{ border-bottom: 3px solid #0f284f; padding-bottom: 10px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: flex-end; }}
+            .logo-area h1 {{ font-size: 28px; font-weight: 800; color: #0f284f; letter-spacing: 1px; margin: 0; text-transform: uppercase; }}
+            .logo-area p {{ font-size: 11px; color: #555; font-style: italic; margin: 2px 0 0 0; }}
+            .report-meta {{ text-align: right; }}
+            .report-type {{ font-size: 13px; font-weight: bold; color: #0f284f; text-transform: uppercase; letter-spacing: 1px; margin: 0; }}
+            .report-date {{ font-size: 11px; color: #666; margin: 2px 0 0 0; }}
+            
+            /* Company Title Box */
+            .title-box {{ background-color: #f4f6f9; padding: 15px 20px; border-left: 6px solid #0f284f; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: center; }}
+            .company-name {{ font-size: 22px; font-weight: 700; color: #111; margin: 0 0 6px 0; text-transform: uppercase; }}
+            .meta-info {{ font-size: 12px; color: #444; margin: 0; }}
+            .meta-info b {{ color: #111; font-weight: 600; }}
+            
+            /* Circular Score Badge */
+            .score-circle {{ background: #0f284f; color: #fff; width: 65px; height: 65px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+            .score-val {{ font-size: 24px; font-weight: 800; line-height: 1; margin-bottom: 2px; }}
+            .score-max {{ font-size: 9px; opacity: 0.85; font-weight: 600; letter-spacing: 0.5px; }}
+
+            /* Clean Print-Ready Table */
+            table {{ width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 30px; }}
+            th {{ background-color: #0f284f; color: #fff; padding: 10px 12px; text-align: left; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border: 1px solid #0f284f; }}
+            td {{ padding: 10px 12px; border-bottom: 1px solid #e2e8f0; border-right: 1px solid #e2e8f0; border-left: 1px solid #e2e8f0; vertical-align: middle; }}
+            tr:nth-child(even) {{ background-color: #fafbfc; }}
+            tr:last-child td {{ border-bottom: 2px solid #0f284f; }}
+            
+            /* Status Badges */
+            .badge {{ padding: 4px 8px; border-radius: 4px; font-weight: 700; font-size: 10px; display: inline-block; text-align: center; text-transform: uppercase; }}
+            .badge-pass {{ background-color: #e6f4ea; color: #137333; border: 1px solid #ceead6; }}
+            .badge-caution {{ background-color: #fef7e0; color: #b06000; border: 1px solid #fce8a6; }}
+            .badge-fail {{ background-color: #fce8e6; color: #c5221f; border: 1px solid #fad2cf; }}
+            .badge-info {{ background-color: #f1f3f4; color: #3c4043; border: 1px solid #dadce0; }}
+            
+            /* Eureka Print Footer */
+            .footer {{ border-top: 1px solid #ddd; padding-top: 12px; display: flex; justify-content: space-between; align-items: flex-start; }}
+            .disclaimer {{ font-size: 9px; color: #666; width: 75%; text-align: justify; line-height: 1.3; }}
+            .footer-branding {{ text-align: right; width: 25%; font-size: 10px; font-weight: bold; color: #0f284f; }}
+            .footer-branding span {{ font-size: 9px; color: #555; font-weight: normal; font-style: italic; display: block; margin-top: 2px; }}
         </style>
     </head>
     <body>
         <div class="header">
-            <span class="logo-text">EUREKA RESEARCH</span>
-            <span class="sub-text">Quantitative Funda Scorecard</span>
+            <div class="logo-area">
+                <h1>EUREKA</h1>
+                <p>a 'Eureka Research' initiative</p>
+            </div>
+            <div class="report-meta">
+                <p class="report-type">Quantitative Funda Scorecard</p>
+                <p class="report-date">{report_date}</p>
+            </div>
         </div>
         
         <div class="title-section">
-            <div>
-                <h1 class="company-name">{d.get('Company Name', symbol)} ({symbol})</h1>
-                <p style="margin: 8px 0; color: #4a5568; font-size: 15px;">
-                    Model: <b>{d.get('Archetype', 'GENERAL')} Sector</b> &nbsp;|&nbsp; 
-                    Live CMP: <b>₹{format_inr(d.get('Current Price'))}</b> &nbsp;|&nbsp; 
-                    Market Cap: <b>₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr</b>
-                </p>
-            </div>
-            <div class="score-box">
-                <div style="font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #64748b; font-weight: 700;">Audit Score</div>
-                <div class="score-value">{final_score}<span style="font-size:20px; color:#94a3b8;">/100</span></div>
+            <div class="title-box">
+                <div>
+                    <h2 class="company-name">{d.get('Company Name', symbol)} ({symbol})</h2>
+                    <p class="meta-info">
+                        Model: <b>{d.get('Archetype', 'GENERAL')} Sector</b> &nbsp;|&nbsp; 
+                        Live CMP: <b>₹{format_inr(d.get('Current Price'))}</b> &nbsp;|&nbsp; 
+                        Market Cap: <b>₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr</b>
+                    </p>
+                </div>
+                <div class="score-circle">
+                    <span class="score-val">{final_score}</span>
+                    <span class="score-max">SCORE</span>
+                </div>
             </div>
         </div>
 
         <table>
             <thead>
                 <tr>
-                    <th width="37%">Checklist Metric</th>
+                    <th width="35%">Checklist Metric</th>
                     <th width="15%">Current Value</th>
-                    <th width="8%">Pts</th>
-                    <th width="12%">Status</th>
-                    <th width="28%">Benchmark Guideline</th>
+                    <th width="8%" style="text-align: center;">Pts</th>
+                    <th width="12%" style="text-align: center;">Status</th>
+                    <th width="30%">Benchmark Guideline</th>
                 </tr>
             </thead>
             <tbody>
     """
     
     for _, row in checklist_df.iterrows():
-        status = str(row['Status'])
-        row_class = "info-row"
-        status_class = "status-info"
+        status_raw = str(row['Status'])
+        # Strip out the emojis for the highly professional print version
+        clean_status = re.sub(r'[^\w\s/]', '', status_raw).strip()
         
-        if "Pass" in status:
-            row_class = "pass-row"
-            status_class = "status-pass"
-        elif "Caution" in status or "Moderate" in status:
-            row_class = "caution-row"
-            status_class = "status-caution"
-        elif "Fail" in status:
-            row_class = "fail-row"
-            status_class = "status-fail"
-        
-        clean_status = re.sub(r'[^\w\s/]', '', status).strip()
-        
+        # Apply strict institutional badge classes
+        if "Pass" in status_raw:
+            badge_class = "badge-pass"
+        elif "Caution" in status_raw or "Moderate" in status_raw:
+            badge_class = "badge-caution"
+        elif "Fail" in status_raw:
+            badge_class = "badge-fail"
+        else:
+            badge_class = "badge-info"
+            
         html += f"""
-                <tr class="{row_class}">
-                    <td style="font-weight: 600; color: #1e293b;">{row['Checklist Metric']}</td>
-                    <td>{row['Current Value']}</td>
-                    <td style="text-align: center; color: #64748b;">{row['Score']}</td>
-                    <td class="{status_class}">{clean_status}</td>
-                    <td style="color: #64748b;">{row['Guideline / Benchmark']}</td>
+                <tr>
+                    <td style="font-weight: 600; color: #111;">{row['Checklist Metric']}</td>
+                    <td style="color: #333;">{row['Current Value']}</td>
+                    <td style="text-align: center; color: #555; font-weight: 600;">{row['Score']}</td>
+                    <td style="text-align: center;"><span class="badge {badge_class}">{clean_status}</span></td>
+                    <td style="color: #555;">{row['Guideline / Benchmark']}</td>
                 </tr>
         """
 
@@ -1420,14 +1449,19 @@ def generate_html_tearsheet(symbol, d, checklist_df, final_score):
         </table>
         
         <div class="footer">
-            Generated automatically by EU Quick Funda Check.<br>
-            <i>Data extracted from public filings. To be used as a supplementary quantitative summary.</i>
+            <div class="disclaimer">
+                <b>Data Integrity Note:</b> Extracted programmatically from public corporate filings via EU Quick Funda Check model. Designed exclusively as a supplementary quantitative summary to accompany qualitative fundamental analysis. Not a standalone investment recommendation.
+            </div>
+            <div class="footer-branding">
+                Infinity by Eureka
+                <span>www.eurekasec.com</span>
+            </div>
         </div>
     </body>
     </html>
     """
     return html
-
+    
 # ----------------- UI APPLICATION -----------------
 if os.path.exists(LOGO_FILE):
     head_col1, head_col2 = st.columns([0.08, 0.92])
