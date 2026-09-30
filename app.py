@@ -1342,6 +1342,11 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
 
     doc = Document()
     
+    # Set global font to Arial for a clean, corporate desktop-publishing look
+    style = doc.styles['Normal']
+    style.font.name = 'Arial'
+    style.font.size = Pt(9)
+
     # Set narrow margins to force a single-page fit
     for section in doc.sections:
         section.top_margin = Inches(0.5)
@@ -1349,17 +1354,21 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
         section.left_margin = Inches(0.5)
         section.right_margin = Inches(0.5)
 
-    # Clean, minimalist title
-    title = doc.add_heading(f"{d.get('Company Name', symbol)} ({symbol})", level=1)
+    # Clean, minimalist title - formatted to match Eureka's style
+    title = doc.add_heading(level=1)
+    title_run = title.add_run(f"QUANTITATIVE SCORECARD: {d.get('Company Name', symbol).upper()} ({symbol})")
+    title_run.font.name = 'Arial'
+    title_run.font.color.rgb = RGBColor(0x0F, 0x28, 0x4F) # Eureka Blue
     title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     
-    # Sub-header meta row
+    # Sub-header meta row (You can easily delete this row in Word if Publisher already has it)
     meta_text = f"Model: {d.get('Archetype', 'GENERAL')} Sector   |   CMP: ₹{format_inr(d.get('Current Price'))}   |   Mcap: ₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr   |   Audit Score: {final_score}/100"
-    p = doc.add_paragraph(meta_text)
+    p = doc.add_paragraph()
     p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    for run in p.runs:
-        run.font.size = Pt(10)
-        run.font.bold = True
+    meta_run = p.add_run(meta_text)
+    meta_run.font.size = Pt(9.5)
+    meta_run.font.bold = True
+    meta_run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
         
     doc.add_paragraph() # Spacer
 
@@ -1373,32 +1382,36 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
     for j, col in enumerate(table.columns):
         col.width = widths[j]
 
-    # Header Row Formatting (Dark Institutional Blue Background)
+    # Header Row Formatting (Eureka Dark Blue Background)
     hdr_cells = table.rows[0].cells
     headers = ['Checklist Metric', 'Current Value', 'Pts', 'Status', 'Guideline / Benchmark']
     for i, header in enumerate(headers):
         hdr_cells[i].text = header
         hdr_cells[i].width = widths[i]
-        set_cell_background(hdr_cells[i], "0F284F") # Dark Blue
-        for run in hdr_cells[i].paragraphs[0].runs:
-            run.font.bold = True
-            run.font.size = Pt(10)
-            run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF) # White Text
+        set_cell_background(hdr_cells[i], "0F284F") # Eureka Dark Blue
+        
+        for paragraph in hdr_cells[i].paragraphs:
+            # Center align the Pts and Status columns
+            paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER if i in [2, 3] else WD_PARAGRAPH_ALIGNMENT.LEFT
+            for run in paragraph.runs:
+                run.font.bold = True
+                run.font.size = Pt(9)
+                run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF) # White Text
             
     # Populate the Table Data with Conditional Formatting
     for _, row in checklist_df.iterrows():
         row_cells = table.add_row().cells
         status_raw = str(row['Status'])
         
-        # 1. Determine Row Background and Text Colors based on status
+        # 1. Determine Softer Row Backgrounds and Text Colors based on status
         if "Pass" in status_raw:
-            bg_hex = "E6F4EA" # Soft Green
+            bg_hex = "F0FDF4" # Very light mint green (Prints much cleaner)
             text_rgb = RGBColor(0x13, 0x73, 0x33)
         elif "Caution" in status_raw or "Moderate" in status_raw:
-            bg_hex = "FEF7E0" # Soft Yellow
+            bg_hex = "FEFCE8" # Very light pastel yellow
             text_rgb = RGBColor(0xB0, 0x60, 0x00)
         elif "Fail" in status_raw:
-            bg_hex = "FCE8E6" # Soft Red
+            bg_hex = "FEF2F2" # Very light pastel red
             text_rgb = RGBColor(0xC5, 0x22, 0x1F)
         else:
             bg_hex = "FFFFFF" # White for Info
@@ -1419,13 +1432,21 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
             set_cell_background(cell, bg_hex)
             
             for paragraph in cell.paragraphs:
+                # Center align the Pts and Status columns
+                paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER if j in [2, 3] else WD_PARAGRAPH_ALIGNMENT.LEFT
+                
                 for run in paragraph.runs:
-                    run.font.size = Pt(9)
+                    run.font.size = Pt(8.5) # Slightly smaller for clean fit
+                    run.font.name = 'Arial'
+                    
                     # Make the 'Status' text bold and colored
                     if j == 3:
                         run.font.bold = True
                         run.font.color.rgb = text_rgb
-                    
+                    # Bold the Metric Name for easier reading
+                    elif j == 0:
+                        run.font.bold = True
+                        
     output = io.BytesIO()
     doc.save(output)
     return output.getvalue()
