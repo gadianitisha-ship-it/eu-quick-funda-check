@@ -441,52 +441,70 @@ def fetch_live_news(ticker: str):
         pass
     return news_items
 
-# ----------------- AI CONCALL SUMMARIZER -----------------
-def generate_ai_concall_summary(pdf_url, api_key, session_cookie):
+# ----------------- MULTI-SOURCE AI CONCALL SUMMARIZER -----------------
+def generate_ai_concall_summary(api_key: str, pdf_url: str = None, uploaded_file = None, raw_text: str = None, session_cookie: str = SCREENER_SESSION_ID):
     try:
-        headers = HEADERS.copy()
-        cookies = {"sessionid": session_cookie} if session_cookie else {}
-        # 1. Fetch PDF into memory
-        res = requests.get(pdf_url, headers=headers, cookies=cookies, timeout=15, allow_redirects=True)
-        
-        if res.status_code != 200:
-            return f"❌ Error: Could not access the document (HTTP {res.status_code})."
-            
-        # 2. Extract text using PyPDF2
-        pdf_file = io.BytesIO(res.content)
-        reader = PyPDF2.PdfReader(pdf_file)
         text = ""
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
-            
-        if len(text.strip()) < 500:
-            return "❌ Error: The PDF appears to be a scanned image or is empty. Gemini requires text-based PDFs."
-            
-        # 3. Call Gemini 1.5 Flash
+
+        # Route A: Direct text paste
+        if raw_text and len(raw_text.strip()) > 100:
+            text = raw_text.strip()
+
+        # Route B: Direct local PDF upload (No Screener lag)
+        elif uploaded_file is not None:
+            reader = PyPDF2.PdfReader(uploaded_file)
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + "\n"
+
+        # Route C: Scraped online PDF
+        elif pdf_url:
+            headers = HEADERS.copy()
+            cookies = {"sessionid": session_cookie} if session_cookie else {}
+            res = requests.get(pdf_url, headers=headers, cookies=cookies, timeout=15, allow_redirects=True)
+            if res.status_code != 200:
+                return f"❌ Could not access document (HTTP {res.status_code})."
+            reader = PyPDF2.PdfReader(io.BytesIO(res.content))
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted + "\n"
+
+        if len(text.strip()) < 200:
+            return "❌ Document text is empty or unreadable. Ensure the PDF contains selectable text rather than flat image scans."
+
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
-        
+
         prompt = f"""
-        You are a seasoned sell-side equity analyst. Read the following earnings concall transcript and provide a highly structured, professional executive summary.
-        
-        Format the output with these exact headers:
-        ### 🎯 Management Sentiment & Guidance
-        ### 🚀 Key Growth & Demand Drivers
-        ### 📉 Margin Headwinds & Tailwinds
-        ### 🏗️ Capex, Order Book & Expansion
-        ### 🚩 Red Flags & Analyst Scrutiny
-        
-        Use concise bullet points. Focus purely on financial metrics, strategic shifts, and concrete numbers mentioned by the management.
-        
-        Transcript Text:
-        {text[:200000]} 
+        You are a senior sell-side equity research analyst. Analyze this earnings call transcript, presentation, or corporate filing.
+        Deliver a crisp, institutional executive summary using this exact structure:
+
+        ### 🎯 Management Sentiment & Forward Guidance
+        - Tone, quantitative revenue/margin guidance, and macro outlook.
+
+        ### 🚀 Demand Environment & Growth Drivers
+        - Key segments, client spending trends, new deal wins, volume vs pricing mix.
+
+        ### 📉 Margin Dynamics & Cost Pressures
+        - Tailwinds, supply-chain costs, wage inflation, or operational efficiencies.
+
+        ### 🏗️ Capex, Capital Allocation & Capacity
+        - Capex timelines, balance sheet allocation, working capital changes.
+
+        ### 🚩 Scrutiny, Analyst Pushback & Red Flags
+        - Difficult questions raised during Q&A, guidance revisions, or execution risks.
+
+        Be rigorous and metric-driven. Extract actual percentages, numbers, and dates.
+
+        Content:
+        {text[:250000]}
         """
-        
+
         response = model.generate_content(prompt)
         return response.text
-        
+
     except Exception as e:
         return f"❌ AI Summarization Failed: {str(e)}"
 
@@ -1486,19 +1504,17 @@ if os.path.exists(LOGO_FILE):
 sidebar.title("EU QUICK FUNDA CHECK")
 sidebar.divider()
 
-with sidebar.form("audit_form"):
-    ticker_input = st.text_input("Enter NSE Ticker", value="TCS").upper()
-    search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
-sidebar.markdown("### 🧠 AI Integrations")
-gemini_key = sidebar.text_input("Gemini API Key (For Concalls)", type="password")
-sidebar.caption("Get a free key from Google AI Studio.")
+# ----------------- SIDEBAR CONTROLS -----------------
+sidebar.markdown("### 🧠 AI Concall Scanner")
+gemini_key = sidebar.text_input("Gemini API Key", type="password", placeholder="Paste AI Studio Key")
 sidebar.divider()
 
 with sidebar.form("audit_form"):
-    
+    ticker_input = st.text_input("Enter NSE Ticker", value="TCS").upper()
+    search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
+
 if ticker_input:
     with st.spinner(f"Auditing institutional financials for {ticker_input}..."):
-        d = scrape_full_screener(ticker_input, SCREENER_SESSION_ID)
         
         df_annual_pe, pe_stats = compute_authentic_historical_pes(
             d["df_pl"] if d else pd.DataFrame(),
