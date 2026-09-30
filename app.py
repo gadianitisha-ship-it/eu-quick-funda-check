@@ -1791,32 +1791,58 @@ if ticker_input:
                 st.markdown("### 🚚 Delivery & Volume Absorption (NSE)")
                 st.link_button("📊 Check Live NSE Delivery on Official Page", f"https://www.nseindia.com/get-quotes/equity?symbol={ticker_input}")
 
-            with ev_col2:
-                st.markdown("### 🎙️ Earnings Calls & Concall Transcripts")
+           with ev_col2:
+                st.markdown("### 🎙️ Earnings Calls & Corporate Filings")
+                
+                # Combine available concalls and immediate announcements
+                available_docs = []
                 if d.get("live_concalls"):
                     for c in d["live_concalls"]:
-                        st.markdown(f"• **{c['Date']}**: [{c['Title']}]({c['Link']})")
-                        
-                    st.divider()
-                    st.markdown("### 🧠 Native AI Concall Scanner")
-                    if gemini_key:
-                        target_concall = st.selectbox("Select Concall to Analyze", [c['Title'] for c in d["live_concalls"]], label_visibility="collapsed")
-                        if st.button("Generate AI Executive Summary", use_container_width=True):
-                            # Find the matching URL for the selected title
-                            target_link = next(c['Link'] for c in d["live_concalls"] if c['Title'] == target_concall)
-                            
-                            with st.spinner("Downloading transcript & running Gemini 1.5 Flash..."):
-                                summary = generate_ai_concall_summary(target_link, gemini_key, SCREENER_SESSION_ID)
-                                st.markdown(summary)
-                    else:
-                        st.info("💡 Enter your free Gemini API Key in the sidebar to unlock 1-click AI Concall Summaries.")
+                        available_docs.append({"Label": f"Concall: {c['Title']} ({c['Date']})", "Link": c['Link']})
+                if d.get("live_announcements"):
+                    for a in d["live_announcements"][:4]:
+                        available_docs.append({"Label": f"Filing: {a['Title']} ({a['Date']})", "Link": a['Link']})
+
+                if available_docs:
+                    for doc in available_docs[:5]:
+                        st.markdown(f"• [{doc['Label']}]({doc['Link']})")
                 else:
-                    st.info("No concall documents found for this company.")
+                    st.info("No recent filings indexed on Screener yet.")
 
                 st.divider()
-                st.markdown("### 🏛️ Official Regulatory Filings & Disclosures")
-                if d.get("live_announcements"):
-                    for ann in d["live_announcements"]:
-                        st.markdown(f"• **{ann['Date']}**: [{ann['Title']}]({ann['Link']})")
+                st.markdown("### 🧠 Instant AI Earnings Analyzer")
+
+                if not gemini_key:
+                    st.warning("Enter your Gemini API key in the sidebar to activate the AI scanner.")
                 else:
-                    st.info("No recent announcements found.")
+                    input_mode = st.radio(
+                        "Ingestion Source",
+                        ["Direct PDF Upload (Instant)", "Indexed Online Document", "Paste Transcript Text"],
+                        horizontal=True
+                    )
+
+                    if input_mode == "Direct PDF Upload (Instant)":
+                        st.caption("Bypasses exchange index lag. Drag and drop any transcript or presentation PDF from the company website or brokerage.")
+                        uploaded_pdf = st.file_uploader("Upload Earnings / Concall PDF", type=["pdf"])
+                        if uploaded_pdf and st.button("Generate Executive Analysis", use_container_width=True):
+                            with st.spinner("Extracting pages & generating institutional briefing..."):
+                                res = generate_ai_concall_summary(api_key=gemini_key, uploaded_file=uploaded_pdf)
+                                st.markdown(res)
+
+                    elif input_mode == "Indexed Online Document":
+                        if available_docs:
+                            doc_choice = st.selectbox("Select Available Filing", [x["Label"] for x in available_docs])
+                            chosen_link = next(x["Link"] for x in available_docs if x["Label"] == doc_choice)
+                            if st.button("Summarize Selected Document", use_container_width=True):
+                                with st.spinner("Streaming PDF from exchange & processing..."):
+                                    res = generate_ai_concall_summary(api_key=gemini_key, pdf_url=chosen_link)
+                                    st.markdown(res)
+                        else:
+                            st.info("No online links currently available to parse.")
+
+                    elif input_mode == "Paste Transcript Text":
+                        transcript_raw = st.text_area("Paste Transcript / Notes", height=200, placeholder="Paste call excerpts, analyst takeaways, or raw text here...")
+                        if transcript_raw and st.button("Summarize Notes", use_container_width=True):
+                            with st.spinner("Processing text through Gemini..."):
+                                res = generate_ai_concall_summary(api_key=gemini_key, raw_text=transcript_raw)
+                                st.markdown(res)
