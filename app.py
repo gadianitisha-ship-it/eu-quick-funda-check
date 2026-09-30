@@ -1342,10 +1342,10 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
 
     doc = Document()
     
-    # Set global font to Arial for a clean, corporate desktop-publishing look
+    # Set global font to Roboto and size 10 to perfectly match the Publisher layout
     style = doc.styles['Normal']
-    style.font.name = 'Arial'
-    style.font.size = Pt(9)
+    style.font.name = 'Roboto'
+    style.font.size = Pt(10)
 
     # Set narrow margins to force a single-page fit
     for section in doc.sections:
@@ -1357,17 +1357,18 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
     # Clean, minimalist title - formatted to match Eureka's style
     title = doc.add_heading(level=1)
     title_run = title.add_run(f"QUANTITATIVE SCORECARD: {d.get('Company Name', symbol).upper()} ({symbol})")
-    title_run.font.name = 'Arial'
+    title_run.font.name = 'Roboto'
     title_run.font.color.rgb = RGBColor(0x0F, 0x28, 0x4F) # Eureka Blue
     title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     
-    # Sub-header meta row (You can easily delete this row in Word if Publisher already has it)
+    # Sub-header meta row
     meta_text = f"Model: {d.get('Archetype', 'GENERAL')} Sector   |   CMP: ₹{format_inr(d.get('Current Price'))}   |   Mcap: ₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr   |   Audit Score: {final_score}/100"
     p = doc.add_paragraph()
     p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     meta_run = p.add_run(meta_text)
-    meta_run.font.size = Pt(9.5)
+    meta_run.font.size = Pt(10)
     meta_run.font.bold = True
+    meta_run.font.name = 'Roboto'
     meta_run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
         
     doc.add_paragraph() # Spacer
@@ -1394,8 +1395,9 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
             # Center align the Pts and Status columns
             paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER if i in [2, 3] else WD_PARAGRAPH_ALIGNMENT.LEFT
             for run in paragraph.runs:
+                run.font.name = 'Roboto'
                 run.font.bold = True
-                run.font.size = Pt(9)
+                run.font.size = Pt(10)
                 run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF) # White Text
             
     # Populate the Table Data with Conditional Formatting
@@ -1405,7 +1407,7 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
         
         # 1. Determine Softer Row Backgrounds and Text Colors based on status
         if "Pass" in status_raw:
-            bg_hex = "F0FDF4" # Very light mint green (Prints much cleaner)
+            bg_hex = "F0FDF4" # Very light mint green
             text_rgb = RGBColor(0x13, 0x73, 0x33)
         elif "Caution" in status_raw or "Moderate" in status_raw:
             bg_hex = "FEFCE8" # Very light pastel yellow
@@ -1436,8 +1438,8 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
                 paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER if j in [2, 3] else WD_PARAGRAPH_ALIGNMENT.LEFT
                 
                 for run in paragraph.runs:
-                    run.font.size = Pt(8.5) # Slightly smaller for clean fit
-                    run.font.name = 'Arial'
+                    run.font.size = Pt(10) # Enforce Size 10
+                    run.font.name = 'Roboto' # Enforce Roboto
                     
                     # Make the 'Status' text bold and colored
                     if j == 3:
