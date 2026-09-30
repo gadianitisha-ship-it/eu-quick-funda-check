@@ -9,6 +9,8 @@ import os
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import yfinance as yf
+import google.generativeai as genai
+import PyPDF2
 
 # ----------------- AUTHENTICATION & CONFIG -----------------
 LOGO_FILE = "logo.png"
@@ -439,39 +441,54 @@ def fetch_live_news(ticker: str):
         pass
     return news_items
 
-# ----------------- SCRAPER ENGINE -----------------
-@st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 18):
-    symbol = symbol.strip().upper()
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    
-    clean_cookie = session_cookie.strip() if session_cookie else ""
-    cookies_dict = {"sessionid": clean_cookie} if clean_cookie else {}
-    
-    if clean_cookie:
-        session.cookies.set("sessionid", clean_cookie, domain=".screener.in", path="/")
-        session.cookies.set("sessionid", clean_cookie, domain="www.screener.in", path="/")
-
-    soup = None
-    urls_to_try = [
-        f"https://www.screener.in/company/{symbol}/consolidated/",
-        f"https://www.screener.in/company/{symbol}/"
-    ]
-
-    for u in urls_to_try:
-        try:
-            r = session.get(u, headers=HEADERS, cookies=cookies_dict, timeout=6.0, allow_redirects=True)
-            if r.status_code == 200 and len(r.text) > 1000:
-                temp_soup = BeautifulSoup(r.text, 'html.parser')
-                if temp_soup.find('section', {'id': re.compile(r'profit-loss|income|quarters|quarterly|balance-sheet', re.I)}):
-                    soup = temp_soup
-                    break
-        except Exception:
-            continue
-
-    if not soup:
-        return None
+# ----------------- AI CONCALL SUMMARIZER -----------------
+def generate_ai_concall_summary(pdf_url, api_key, session_cookie):
+    try:
+        headers = HEADERS.copy()
+        cookies = {"sessionid": session_cookie} if session_cookie else {}
+        # 1. Fetch PDF into memory
+        res = requests.get(pdf_url, headers=headers, cookies=cookies, timeout=15, allow_redirects=True)
+        
+        if res.status_code != 200:
+            return f"❌ Error: Could not access the document (HTTP {res.status_code})."
+            
+        # 2. Extract text using PyPDF2
+        pdf_file = io.BytesIO(res.content)
+        reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+            
+        if len(text.strip()) < 500:
+            return "❌ Error: The PDF appears to be a scanned image or is empty. Gemini requires text-based PDFs."
+            
+        # 3. Call Gemini 1.5 Flash
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        prompt = f"""
+        You are a seasoned sell-side equity analyst. Read the following earnings concall transcript and provide a highly structured, professional executive summary.
+        
+        Format the output with these exact headers:
+        ### 🎯 Management Sentiment & Guidance
+        ### 🚀 Key Growth & Demand Drivers
+        ### 📉 Margin Headwinds & Tailwinds
+        ### 🏗️ Capex, Order Book & Expansion
+        ### 🚩 Red Flags & Analyst Scrutiny
+        
+        Use concise bullet points. Focus purely on financial metrics, strategic shifts, and concrete numbers mentioned by the management.
+        
+        Transcript Text:
+        {text[:200000]} 
+        """
+        
+        response = model.generate_content(prompt)
+        return response.text
+        
+    except Exception as e:
+        return f"❌ AI Summarization Failed: {str(e)}"
 
     data = {"Symbol": symbol}
     
@@ -1472,7 +1489,13 @@ sidebar.divider()
 with sidebar.form("audit_form"):
     ticker_input = st.text_input("Enter NSE Ticker", value="TCS").upper()
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
+sidebar.markdown("### 🧠 AI Integrations")
+gemini_key = sidebar.text_input("Gemini API Key (For Concalls)", type="password")
+sidebar.caption("Get a free key from Google AI Studio.")
+sidebar.divider()
 
+with sidebar.form("audit_form"):
+    
 if ticker_input:
     with st.spinner(f"Auditing institutional financials for {ticker_input}..."):
         d = scrape_full_screener(ticker_input, SCREENER_SESSION_ID)
@@ -1757,6 +1780,20 @@ if ticker_input:
                 if d.get("live_concalls"):
                     for c in d["live_concalls"]:
                         st.markdown(f"• **{c['Date']}**: [{c['Title']}]({c['Link']})")
+                        
+                    st.divider()
+                    st.markdown("### 🧠 Native AI Concall Scanner")
+                    if gemini_key:
+                        target_concall = st.selectbox("Select Concall to Analyze", [c['Title'] for c in d["live_concalls"]], label_visibility="collapsed")
+                        if st.button("Generate AI Executive Summary", use_container_width=True):
+                            # Find the matching URL for the selected title
+                            target_link = next(c['Link'] for c in d["live_concalls"] if c['Title'] == target_concall)
+                            
+                            with st.spinner("Downloading transcript & running Gemini 1.5 Flash..."):
+                                summary = generate_ai_concall_summary(target_link, gemini_key, SCREENER_SESSION_ID)
+                                st.markdown(summary)
+                    else:
+                        st.info("💡 Enter your free Gemini API Key in the sidebar to unlock 1-click AI Concall Summaries.")
                 else:
                     st.info("No concall documents found for this company.")
 
