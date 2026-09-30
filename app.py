@@ -441,7 +441,7 @@ def fetch_live_news(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 17):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 18):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -978,7 +978,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
 
-    # 3. VALUATION (25 Pts Total — Reallocated to Own Historical Baselines)
+    # 3. VALUATION (25 Pts Total)
     dist_h = safe_float(m.get("Dist_High_Pct"))
     dist_l = safe_float(m.get("Dist_Low_Pct"))
     if dist_h is not None and dist_l is not None:
@@ -1323,145 +1323,84 @@ def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_tab
             d["df_shareholding"].to_excel(writer, sheet_name='Shareholding')
     return output.getvalue()
 
-# ----------------- HTML TEAR-SHEET EXPORT HELPER -----------------
-def generate_html_tearsheet(symbol, d, checklist_df, final_score):
-    report_date = datetime.now().strftime("%d %B %Y")
-    
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>{symbol} - Eureka Funda Scorecard</title>
-        <style>
-            @page {{ size: A4; margin: 15mm; }}
-            body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; margin: 0; padding: 20px; color: #222; background: #fff; line-height: 1.4; }}
-            
-            /* Eureka Header Branding */
-            .header {{ border-bottom: 3px solid #0f284f; padding-bottom: 10px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: flex-end; }}
-            .logo-area h1 {{ font-size: 28px; font-weight: 800; color: #0f284f; letter-spacing: 1px; margin: 0; text-transform: uppercase; }}
-            .logo-area p {{ font-size: 11px; color: #555; font-style: italic; margin: 2px 0 0 0; }}
-            .report-meta {{ text-align: right; }}
-            .report-type {{ font-size: 13px; font-weight: bold; color: #0f284f; text-transform: uppercase; letter-spacing: 1px; margin: 0; }}
-            .report-date {{ font-size: 11px; color: #666; margin: 2px 0 0 0; }}
-            
-            /* Company Title Box */
-            .title-box {{ background-color: #f4f6f9; padding: 15px 20px; border-left: 6px solid #0f284f; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: center; }}
-            .company-name {{ font-size: 22px; font-weight: 700; color: #111; margin: 0 0 6px 0; text-transform: uppercase; }}
-            .meta-info {{ font-size: 12px; color: #444; margin: 0; }}
-            .meta-info b {{ color: #111; font-weight: 600; }}
-            
-            /* Circular Score Badge */
-            .score-circle {{ background: #0f284f; color: #fff; width: 65px; height: 65px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-            .score-val {{ font-size: 24px; font-weight: 800; line-height: 1; margin-bottom: 2px; }}
-            .score-max {{ font-size: 9px; opacity: 0.85; font-weight: 600; letter-spacing: 0.5px; }}
+# ----------------- WORD (.DOCX) TEAR-SHEET EXPORT HELPER -----------------
+def generate_word_tearsheet(symbol, d, checklist_df, final_score):
+    try:
+        from docx import Document
+        from docx.shared import Pt, Inches
+        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+    except ImportError:
+        st.error("Please add 'python-docx' to your requirements.txt file to enable Word (.docx) downloads.")
+        return b""
 
-            /* Clean Print-Ready Table */
-            table {{ width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 30px; }}
-            th {{ background-color: #0f284f; color: #fff; padding: 10px 12px; text-align: left; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border: 1px solid #0f284f; }}
-            td {{ padding: 10px 12px; border-bottom: 1px solid #e2e8f0; border-right: 1px solid #e2e8f0; border-left: 1px solid #e2e8f0; vertical-align: middle; }}
-            tr:nth-child(even) {{ background-color: #fafbfc; }}
-            tr:last-child td {{ border-bottom: 2px solid #0f284f; }}
-            
-            /* Status Badges */
-            .badge {{ padding: 4px 8px; border-radius: 4px; font-weight: 700; font-size: 10px; display: inline-block; text-align: center; text-transform: uppercase; }}
-            .badge-pass {{ background-color: #e6f4ea; color: #137333; border: 1px solid #ceead6; }}
-            .badge-caution {{ background-color: #fef7e0; color: #b06000; border: 1px solid #fce8a6; }}
-            .badge-fail {{ background-color: #fce8e6; color: #c5221f; border: 1px solid #fad2cf; }}
-            .badge-info {{ background-color: #f1f3f4; color: #3c4043; border: 1px solid #dadce0; }}
-            
-            /* Eureka Print Footer */
-            .footer {{ border-top: 1px solid #ddd; padding-top: 12px; display: flex; justify-content: space-between; align-items: flex-start; }}
-            .disclaimer {{ font-size: 9px; color: #666; width: 75%; text-align: justify; line-height: 1.3; }}
-            .footer-branding {{ text-align: right; width: 25%; font-size: 10px; font-weight: bold; color: #0f284f; }}
-            .footer-branding span {{ font-size: 9px; color: #555; font-weight: normal; font-style: italic; display: block; margin-top: 2px; }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <div class="logo-area">
-                <h1>EUREKA</h1>
-                <p>a 'Eureka Research' initiative</p>
-            </div>
-            <div class="report-meta">
-                <p class="report-type">Quantitative Funda Scorecard</p>
-                <p class="report-date">{report_date}</p>
-            </div>
-        </div>
+    doc = Document()
+    
+    # Set narrow margins to force a single-page fit
+    for section in doc.sections:
+        section.top_margin = Inches(0.5)
+        section.bottom_margin = Inches(0.5)
+        section.left_margin = Inches(0.5)
+        section.right_margin = Inches(0.5)
+
+    # Clean, minimalist title
+    title = doc.add_heading(f"{d.get('Company Name', symbol)} ({symbol})", level=1)
+    title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    
+    # Sub-header meta row
+    meta_text = f"Model: {d.get('Archetype', 'GENERAL')} Sector   |   CMP: ₹{format_inr(d.get('Current Price'))}   |   Mcap: ₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr   |   Audit Score: {final_score}/100"
+    p = doc.add_paragraph(meta_text)
+    p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    for run in p.runs:
+        run.font.size = Pt(10)
+        run.font.bold = True
         
-        <div class="title-section">
-            <div class="title-box">
-                <div>
-                    <h2 class="company-name">{d.get('Company Name', symbol)} ({symbol})</h2>
-                    <p class="meta-info">
-                        Model: <b>{d.get('Archetype', 'GENERAL')} Sector</b> &nbsp;|&nbsp; 
-                        Live CMP: <b>₹{format_inr(d.get('Current Price'))}</b> &nbsp;|&nbsp; 
-                        Market Cap: <b>₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr</b>
-                    </p>
-                </div>
-                <div class="score-circle">
-                    <span class="score-val">{final_score}</span>
-                    <span class="score-max">SCORE</span>
-                </div>
-            </div>
-        </div>
+    doc.add_paragraph() # Spacer
 
-        <table>
-            <thead>
-                <tr>
-                    <th width="35%">Checklist Metric</th>
-                    <th width="15%">Current Value</th>
-                    <th width="8%" style="text-align: center;">Pts</th>
-                    <th width="12%" style="text-align: center;">Status</th>
-                    <th width="30%">Benchmark Guideline</th>
-                </tr>
-            </thead>
-            <tbody>
-    """
+    # Build the Scorecard Table
+    table = doc.add_table(rows=1, cols=5)
+    table.style = 'Table Grid'
+    table.autofit = False
     
+    # Set precise column widths (Total ~7.5 inches)
+    widths = [Inches(2.5), Inches(1.2), Inches(0.6), Inches(1.0), Inches(2.2)]
+    for j, col in enumerate(table.columns):
+        col.width = widths[j]
+
+    # Header Row Formatting
+    hdr_cells = table.rows[0].cells
+    headers = ['Checklist Metric', 'Current Value', 'Pts', 'Status', 'Guideline / Benchmark']
+    for i, header in enumerate(headers):
+        hdr_cells[i].text = header
+        hdr_cells[i].width = widths[i]
+        for run in hdr_cells[i].paragraphs[0].runs:
+            run.font.bold = True
+            run.font.size = Pt(10)
+            
+    # Populate the Table Data
     for _, row in checklist_df.iterrows():
-        status_raw = str(row['Status'])
-        # Strip out the emojis for the highly professional print version
-        clean_status = re.sub(r'[^\w\s/]', '', status_raw).strip()
+        row_cells = table.add_row().cells
         
-        # Apply strict institutional badge classes
-        if "Pass" in status_raw:
-            badge_class = "badge-pass"
-        elif "Caution" in status_raw or "Moderate" in status_raw:
-            badge_class = "badge-caution"
-        elif "Fail" in status_raw:
-            badge_class = "badge-fail"
-        else:
-            badge_class = "badge-info"
-            
-        html += f"""
-                <tr>
-                    <td style="font-weight: 600; color: #111;">{row['Checklist Metric']}</td>
-                    <td style="color: #333;">{row['Current Value']}</td>
-                    <td style="text-align: center; color: #555; font-weight: 600;">{row['Score']}</td>
-                    <td style="text-align: center;"><span class="badge {badge_class}">{clean_status}</span></td>
-                    <td style="color: #555;">{row['Guideline / Benchmark']}</td>
-                </tr>
-        """
+        row_cells[0].text = str(row['Checklist Metric'])
+        row_cells[1].text = str(row['Current Value'])
+        row_cells[2].text = str(row['Score'])
+        
+        # Strip out emojis for the sterile Word document format
+        clean_status = re.sub(r'[^\w\s/]', '', str(row['Status'])).strip()
+        row_cells[3].text = clean_status
+        
+        row_cells[4].text = str(row['Guideline / Benchmark'])
+        
+        # Apply 9pt font to all data cells to ensure vertical single-page fit
+        for j, cell in enumerate(row_cells):
+            cell.width = widths[j]
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    run.font.size = Pt(9)
+                    
+    output = io.BytesIO()
+    doc.save(output)
+    return output.getvalue()
 
-    html += f"""
-            </tbody>
-        </table>
-        
-        <div class="footer">
-            <div class="disclaimer">
-                <b>Data Integrity Note:</b> Extracted programmatically from public corporate filings via EU Quick Funda Check model. Designed exclusively as a supplementary quantitative summary to accompany qualitative fundamental analysis. Not a standalone investment recommendation.
-            </div>
-            <div class="footer-branding">
-                Infinity by Eureka
-                <span>www.eurekasec.com</span>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    return html
-    
 # ----------------- UI APPLICATION -----------------
 if os.path.exists(LOGO_FILE):
     head_col1, head_col2 = st.columns([0.08, 0.92])
@@ -1532,7 +1471,7 @@ if ticker_input:
         extended_matrix_df = pd.DataFrame(extended_matrix)
 
         excel_bytes = generate_excel_report(ticker_input, d, checklist_df, extended_matrix_df, df_annual_pe, df_forensics, df_dupont)
-        html_tearsheet = generate_html_tearsheet(ticker_input, d, checklist_df, final_score)
+        word_bytes = generate_word_tearsheet(ticker_input, d, checklist_df, final_score)
         
         sidebar.divider()
         sidebar.download_button(
@@ -1544,10 +1483,10 @@ if ticker_input:
         )
         
         sidebar.download_button(
-            label=f"📄 Download Printable PDF Report",
-            data=html_tearsheet,
-            file_name=f"{ticker_input}_Eureka_Scorecard.html",
-            mime="text/html",
+            label=f"📄 Download Editable Word Report",
+            data=word_bytes,
+            file_name=f"{ticker_input}_Scorecard.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             use_container_width=True
         )
 
