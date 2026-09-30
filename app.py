@@ -1327,11 +1327,18 @@ def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_tab
 def generate_word_tearsheet(symbol, d, checklist_df, final_score):
     try:
         from docx import Document
-        from docx.shared import Pt, Inches
+        from docx.shared import Pt, Inches, RGBColor
         from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+        from docx.oxml.ns import nsdecls
+        from docx.oxml import parse_xml
     except ImportError:
         st.error("Please add 'python-docx' to your requirements.txt file to enable Word (.docx) downloads.")
         return b""
+
+    # Helper function to inject native background colors into Word table cells
+    def set_cell_background(cell, hex_color):
+        shading_elm = parse_xml(r'<w:shd {} w:fill="{}"/>'.format(nsdecls('w'), hex_color))
+        cell._tc.get_or_add_tcPr().append(shading_elm)
 
     doc = Document()
     
@@ -1362,40 +1369,62 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
     table.autofit = False
     
     # Set precise column widths (Total ~7.5 inches)
-    widths = [Inches(2.5), Inches(1.2), Inches(0.6), Inches(1.0), Inches(2.2)]
+    widths = [Inches(2.3), Inches(1.2), Inches(0.6), Inches(1.0), Inches(2.4)]
     for j, col in enumerate(table.columns):
         col.width = widths[j]
 
-    # Header Row Formatting
+    # Header Row Formatting (Dark Institutional Blue Background)
     hdr_cells = table.rows[0].cells
     headers = ['Checklist Metric', 'Current Value', 'Pts', 'Status', 'Guideline / Benchmark']
     for i, header in enumerate(headers):
         hdr_cells[i].text = header
         hdr_cells[i].width = widths[i]
+        set_cell_background(hdr_cells[i], "0F284F") # Dark Blue
         for run in hdr_cells[i].paragraphs[0].runs:
             run.font.bold = True
             run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF) # White Text
             
-    # Populate the Table Data
+    # Populate the Table Data with Conditional Formatting
     for _, row in checklist_df.iterrows():
         row_cells = table.add_row().cells
+        status_raw = str(row['Status'])
+        
+        # 1. Determine Row Background and Text Colors based on status
+        if "Pass" in status_raw:
+            bg_hex = "E6F4EA" # Soft Green
+            text_rgb = RGBColor(0x13, 0x73, 0x33)
+        elif "Caution" in status_raw or "Moderate" in status_raw:
+            bg_hex = "FEF7E0" # Soft Yellow
+            text_rgb = RGBColor(0xB0, 0x60, 0x00)
+        elif "Fail" in status_raw:
+            bg_hex = "FCE8E6" # Soft Red
+            text_rgb = RGBColor(0xC5, 0x22, 0x1F)
+        else:
+            bg_hex = "FFFFFF" # White for Info
+            text_rgb = RGBColor(0x55, 0x55, 0x55)
         
         row_cells[0].text = str(row['Checklist Metric'])
         row_cells[1].text = str(row['Current Value'])
         row_cells[2].text = str(row['Score'])
         
         # Strip out emojis for the sterile Word document format
-        clean_status = re.sub(r'[^\w\s/]', '', str(row['Status'])).strip()
+        clean_status = re.sub(r'[^\w\s/]', '', status_raw).strip()
         row_cells[3].text = clean_status
-        
         row_cells[4].text = str(row['Guideline / Benchmark'])
         
-        # Apply 9pt font to all data cells to ensure vertical single-page fit
+        # 2. Apply formatting, fonts, and background colors to the row
         for j, cell in enumerate(row_cells):
             cell.width = widths[j]
+            set_cell_background(cell, bg_hex)
+            
             for paragraph in cell.paragraphs:
                 for run in paragraph.runs:
                     run.font.size = Pt(9)
+                    # Make the 'Status' text bold and colored
+                    if j == 3:
+                        run.font.bold = True
+                        run.font.color.rgb = text_rgb
                     
     output = io.BytesIO()
     doc.save(output)
