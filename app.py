@@ -1791,7 +1791,7 @@ if ticker_input:
                 st.markdown("### 🚚 Delivery & Volume Absorption (NSE)")
                 st.link_button("📊 Check Live NSE Delivery on Official Page", f"https://www.nseindia.com/get-quotes/equity?symbol={ticker_input}")
 
-           with ev_col2:
+            with ev_col2:
                 st.markdown("### 🎙️ Earnings Calls & Corporate Filings")
                 
                 # Combine available concalls and immediate announcements
