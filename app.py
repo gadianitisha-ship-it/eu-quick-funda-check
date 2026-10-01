@@ -508,6 +508,40 @@ def generate_ai_concall_summary(api_key: str, pdf_url: str = None, uploaded_file
     except Exception as e:
         return f"❌ AI Summarization Failed: {str(e)}"
 
+# ----------------- SCRAPER ENGINE -----------------
+@st.cache_data(ttl=600, show_spinner=False)
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 18):
+    symbol = symbol.strip().upper()
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    
+    clean_cookie = session_cookie.strip() if session_cookie else ""
+    cookies_dict = {"sessionid": clean_cookie} if clean_cookie else {}
+    
+    if clean_cookie:
+        session.cookies.set("sessionid", clean_cookie, domain=".screener.in", path="/")
+        session.cookies.set("sessionid", clean_cookie, domain="www.screener.in", path="/")
+
+    soup = None
+    urls_to_try = [
+        f"https://www.screener.in/company/{symbol}/consolidated/",
+        f"https://www.screener.in/company/{symbol}/"
+    ]
+
+    for u in urls_to_try:
+        try:
+            r = session.get(u, headers=HEADERS, cookies=cookies_dict, timeout=6.0, allow_redirects=True)
+            if r.status_code == 200 and len(r.text) > 1000:
+                temp_soup = BeautifulSoup(r.text, 'html.parser')
+                if temp_soup.find('section', {'id': re.compile(r'profit-loss|income|quarters|quarterly|balance-sheet', re.I)}):
+                    soup = temp_soup
+                    break
+        except Exception:
+            continue
+
+    if not soup:
+        return None
+
     data = {"Symbol": symbol}
     
     title_tag = soup.find('h1')
@@ -959,7 +993,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     add_item("Overview", "Sector & Index", f"{m.get('Sector_Desc', 'General')} [{archetype}]", 0, 0, "ℹ️ Info", "Sectoral trend / Index membership")
     add_item("Overview", "CMP (Live)", f"₹{format_inr(m.get('Current Price'))}", 0, 0, "ℹ️ Info", "Live Market Price")
     add_item("Overview", "Book Value (Audited)", f"₹{format_inr(m.get('Book Value'))}", 0, 0, "ℹ️ Info", "Reported Book Value")
-    add_item("Overview", "Face Value", f"₹{m.get('Face Value', 'N/A')}", 0, 0, "ℹ️ Info", "Nominal Share Par Value")
+    add_item("Overview", "Face Value", f"₹{m.get('Face Value', 'N/A')}", 0, 0, "ℹ️️ Info", "Nominal Share Par Value")
     add_item("Overview", "Dividend Yield (TTM)", f"{m.get('Dividend Yield', 0.0)}%", 0, 0, "ℹ️ Info", "For Info (Low does not necessarily mean Bad)")
 
     # 2. SOLVENCY & SCALE (40 Pts Total)
@@ -1232,7 +1266,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Sector-Specific (BFSI)", "Net NPA %", f"{nnpa}% [{nnpa_period}]", 0, 5, "🔴 Caution", "Elevated provisioning required (> 1.2%)")
         else:
-            add_item("Sector-Specific (BFSI)", "Net NPA %", "Data Unavailable", 0, 0, "ℹ️ Info", "NPA data missing")
+            add_item("Sector-Specific (BFSI)", "Net NPA %", "Data Unavailable", 0, 0, "ℹ️️ Info", "NPA data missing")
 
         cmp_v = safe_float(m.get("Current Price"))
         bv_v = safe_float(m.get("Book Value"))
@@ -1306,7 +1340,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             else:
                 add_item("Sector-Specific (Pharma)", "Debtor / Collection Velocity", f"{d_days} Days", 0, 5, "🔴 Caution", "Working capital locked in receivables (> 125 days)")
         else:
-            add_item("Sector-Specific (Pharma)", "Debtor / Collection Velocity", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
+            add_item("Sector-Specific (Pharma)", "Debtor / Collection Velocity", "Data Unavailable", 0, 0, "ℹ️️ Info", "Data missing")
 
     df = pd.DataFrame(results)
     scored_rows = df[df["MaxPts"] > 0]
@@ -1515,6 +1549,8 @@ with sidebar.form("audit_form"):
 
 if ticker_input:
     with st.spinner(f"Auditing institutional financials for {ticker_input}..."):
+        
+        d = scrape_full_screener(ticker_input, SCREENER_SESSION_ID)
         
         df_annual_pe, pe_stats = compute_authentic_historical_pes(
             d["df_pl"] if d else pd.DataFrame(),
