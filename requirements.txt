@@ -3,4 +3,6 @@ requests
 beautifulsoup4
 pandas
 numpy
+yfinance
 openpyxl
+python-docx

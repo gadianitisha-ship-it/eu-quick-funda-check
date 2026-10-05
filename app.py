@@ -7,8 +7,12 @@ import re
 import io
 import os
 import xml.etree.ElementTree as ET
+from datetime import datetime
+import yfinance as yf
 
+# ----------------- AUTHENTICATION & CONFIG -----------------
 LOGO_FILE = "logo.png"
+SCREENER_SESSION_ID = "r3urgq7ycs7bw09j22nffzntc0hd5dl3"
 
 st.set_page_config(
     page_title="EU QUICK FUNDA CHECK",
@@ -39,10 +43,6 @@ def safe_float(val, default=None):
     return default
 
 def format_inr(val):
-    """
-    Formats integers and float values into the standard Indian numbering system:
-    100000 -> 1,00,000
-    """
     if val is None or val == "" or str(val).strip() in ["-", "None", "nan", "N/A"]:
         return "-"
     num = safe_float(val)
@@ -52,7 +52,6 @@ def format_inr(val):
     is_neg = num < 0
     num = abs(num)
     
-    # Check if number is practically an integer (e.g. 1500.0)
     if num == int(num):
         s = str(int(num))
         dec = ""
@@ -77,9 +76,8 @@ def format_inr(val):
     return f"-{formatted}" if is_neg else formatted
 
 def format_financial_df(df):
-    """Applies Indian numeric formatting across an entire financial statement DataFrame."""
-    if df.empty:
-        return df
+    if df is None or df.empty:
+        return pd.DataFrame()
     formatted_df = df.copy()
     for col in formatted_df.columns:
         formatted_df[col] = formatted_df[col].apply(lambda x: format_inr(x) if safe_float(x) is not None else x)
@@ -98,18 +96,65 @@ def compute_series_cagr(series, years):
     except Exception:
         return "N/A", start_val, end_val
 
-# ----------------- TRUE HISTORICAL P/E ENGINE (AUDITED BASIS) -----------------
-def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, curr_pe, face_val):
-    if df_pl.empty or not cmp_val or cmp_val <= 0:
+# ----------------- SECTOR ARCHETYPE RESOLVER -----------------
+def resolve_sector_archetype(sector_desc: str, company_name: str) -> str:
+    text = f"{sector_desc} {company_name}".lower()
+    if any(k in text for k in ["bank", "nbfc", "housing finance", "financial services", "insurance", "microfinance", "small finance"]):
+        return "BFSI"
+    elif any(k in text for k in ["it services", "software", "computers - software", "information technology", "data processing", "technology"]):
+        return "IT"
+    elif any(k in text for k in ["pharma", "pharmaceutical", "drugs", "healthcare", "biotechnology", "hospital"]):
+        return "PHARMA"
+    return "GENERAL"
+
+# ----------------- REAL HISTORICAL PRICE & P/E ENGINE -----------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_real_historical_prices(symbol: str):
+    price_map = {}
+    if not symbol:
+        return price_map
+        
+    for exchange in [".NS", ".BO"]:
+        try:
+            ticker = f"{symbol.strip().upper()}{exchange}"
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="max")
+            
+            if hist.empty:
+                continue
+                
+            hist.index = pd.to_datetime(hist.index)
+            if hist.index.tz is not None:
+                hist.index = hist.index.tz_localize(None)
+                
+            curr_year = datetime.now().year
+            temp_map = {}
+            for year in range(2010, curr_year + 1):
+                march_data = hist[(hist.index.year == year) & (hist.index.month == 3)]
+                if not march_data.empty:
+                    last_row = march_data.iloc[-1]
+                    temp_map[f"Mar {year}"] = round(float(last_row['Close']), 1)
+            
+            if len(temp_map) > 0:
+                price_map = temp_map
+                break
+        except Exception:
+            continue
+            
+    return price_map
+
+def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, curr_pe, face_val, symbol=""):
+    if df_pl is None or df_pl.empty:
         return pd.DataFrame(), {}
 
     eps_row = None
     net_profit_row = None
+    
     for idx in df_pl.index:
-        idx_lower = str(idx).lower()
-        if "eps" in idx_lower and not eps_row:
+        idx_lower = str(idx).lower().strip()
+        if any(k in idx_lower for k in ["eps", "earnings per share"]) and "margin" not in idx_lower and "%" not in idx_lower:
             eps_row = idx
-        if "net profit" in idx_lower and not net_profit_row:
+        if any(k in idx_lower for k in ["net profit", "net loss"]) and "margin" not in idx_lower and "%" not in idx_lower:
             net_profit_row = idx
 
     if not eps_row:
@@ -118,61 +163,42 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
     cols = [c for c in df_pl.columns if c.lower() != 'ttm']
     records = []
     
-    cagr_10 = safe_float(price_cagr_dict.get("10 Years"))
-    cagr_5 = safe_float(price_cagr_dict.get("5 Years"))
-    cagr_3 = safe_float(price_cagr_dict.get("3 Years"))
-    cagr_1 = safe_float(price_cagr_dict.get("1 Year"))
-
-    r_10 = (1 + cagr_10 / 100.0) if cagr_10 is not None else 1.10
-    r_5 = (1 + cagr_5 / 100.0) if cagr_5 is not None else 1.12
-    r_3 = (1 + cagr_3 / 100.0) if cagr_3 is not None else 1.15
-    r_1 = (1 + cagr_1 / 100.0) if cagr_1 is not None else 1.10
-
-    total_cols = len(cols)
-    fv = safe_float(face_val, 10.0)
+    real_prices = fetch_real_historical_prices(symbol)
 
     for idx_yr, c in enumerate(cols):
         eps_val = safe_float(df_pl.loc[eps_row, c])
         np_val = safe_float(df_pl.loc[net_profit_row, c]) if net_profit_row else None
         
-        years_back = (total_cols - 1) - idx_yr
+        real_price = real_prices.get(c.strip())
         
-        if years_back == 0:
-            hist_price = cmp_val
-            hist_pe = round(safe_float(curr_pe, cmp_val / eps_val if (eps_val and eps_val > 0) else 20.0), 1)
-        elif years_back == 1 and r_1 > 0:
-            hist_price = round(cmp_val / r_1, 1)
-            hist_pe = round(hist_price / eps_val, 1) if (eps_val and eps_val > 0) else None
-        elif years_back <= 3 and r_3 > 0:
-            hist_price = round(cmp_val / (r_3 ** years_back), 1)
-            hist_pe = round(hist_price / eps_val, 1) if (eps_val and eps_val > 0) else None
-        elif years_back <= 5 and r_5 > 0:
-            hist_price = round(cmp_val / (r_5 ** years_back), 1)
+        if real_price:
+            hist_price = real_price
             hist_pe = round(hist_price / eps_val, 1) if (eps_val and eps_val > 0) else None
         else:
-            hist_price = round(cmp_val / (r_10 ** years_back), 1) if r_10 > 0 else None
+            hist_price = cmp_val if idx_yr == len(cols) - 1 else None
             hist_pe = round(hist_price / eps_val, 1) if (hist_price and eps_val and eps_val > 0) else None
 
         records.append({
             "Fiscal Year": c,
             "Reported EPS (₹)": round(eps_val, 2) if eps_val is not None else "N/A",
             "Net Profit (₹ Cr)": format_inr(np_val),
-            "Historical Year-End Price (₹)": format_inr(hist_price),
+            "Historical Year-End Price (₹)": format_inr(hist_price) if hist_price else "-",
             "Historical Year-End P/E": hist_pe if hist_pe is not None else "-"
         })
 
     df_hist = pd.DataFrame(records)
     valid_pes = [r["Historical Year-End P/E"] for r in records if isinstance(r["Historical Year-End P/E"], (int, float))]
+    filtered_pes = [p for p in valid_pes if isinstance(p, (int, float)) and 0 < p <= 100]
     
-    if valid_pes:
-        med_3 = round(float(np.median(valid_pes[-3:])), 1) if len(valid_pes) >= 3 else round(float(np.median(valid_pes)), 1)
-        med_5 = round(float(np.median(valid_pes[-5:])), 1) if len(valid_pes) >= 5 else round(float(np.median(valid_pes)), 1)
-        med_10 = round(float(np.median(valid_pes)), 1)
-        mean_pe = round(float(np.mean(valid_pes)), 1)
-        std_pe = round(float(np.std(valid_pes)), 1)
-        curr_p_val = valid_pes[-1]
+    if filtered_pes:
+        med_3 = round(float(np.median(filtered_pes[-3:])), 1) if len(filtered_pes) >= 3 else round(float(np.median(filtered_pes)), 1)
+        med_5 = round(float(np.median(filtered_pes[-5:])), 1) if len(filtered_pes) >= 5 else round(float(np.median(filtered_pes)), 1)
+        med_10 = round(float(np.median(filtered_pes)), 1)
+        mean_pe = round(float(np.mean(filtered_pes)), 1)
+        std_pe = round(float(np.std(filtered_pes)), 1)
         
-        diff_5y = round(((curr_p_val - med_5) / med_5) * 100, 1) if med_5 > 0 else 0.0
+        live_pe_val = safe_float(curr_pe, valid_pes[-1] if valid_pes else 15.0)
+        diff_5y = round(((live_pe_val - med_5) / med_5) * 100, 1) if med_5 > 0 else 0.0
         
         if diff_5y > 20:
             zone_desc = f"🔴 Premium / Overvalued ({diff_5y}% above 5Y Median)"
@@ -182,7 +208,7 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
             zone_desc = f"🟡 Fair Value Zone (Trading within ±15% of 5Y Median)"
 
         pe_stats = {
-            "Current_PE": curr_p_val,
+            "Current_PE": live_pe_val,
             "3Y_Median": med_3,
             "5Y_Median": med_5,
             "10Y_Median": med_10,
@@ -195,27 +221,32 @@ def compute_authentic_historical_pes(df_pl, df_bs, cmp_val, price_cagr_dict, cur
 
     return df_hist, {}
 
-# ----------------- DUPONT 3-STAGE WITH NEGATIVE EQUITY GUARD -----------------
+# ----------------- DUPONT 3-STAGE ENGINE -----------------
 def compute_dupont_analysis(df_pl, df_bs):
-    if df_pl.empty or df_bs.empty:
+    if df_pl is None or df_pl.empty or df_bs is None or df_bs.empty:
         return pd.DataFrame()
 
-    def get_row(df, kw):
+    def get_last_matching_row(df, keywords, exclude_kws=None):
+        exclude_kws = exclude_kws or []
+        matched_row = None
         for idx in df.index:
-            if kw.lower() in str(idx).lower():
-                return df.loc[idx]
-        return None
+            idx_lower = str(idx).lower().strip()
+            if any(kw.lower() in idx_lower for kw in keywords):
+                if any(excl.lower() in idx_lower for excl in exclude_kws):
+                    continue
+                matched_row = df.loc[idx]
+        return matched_row
 
-    sales_row = get_row(df_pl, "Sales")
-    pat_row = get_row(df_pl, "Net Profit")
-    assets_row = get_row(df_bs, "Total Assets")
-    eq_row = get_row(df_bs, "Equity Capital")
-    res_row = get_row(df_bs, "Reserves")
+    sales_row = get_last_matching_row(df_pl, ["sales", "revenue", "interest earned"])
+    pat_row = get_last_matching_row(df_pl, ["net profit", "net loss"], exclude_kws=["margin", "%"])
+    assets_row = get_last_matching_row(df_bs, ["total assets"])
+    eq_row = get_last_matching_row(df_bs, ["equity capital", "share capital"])
+    res_row = get_last_matching_row(df_bs, ["reserves"])
 
     if sales_row is None or pat_row is None or assets_row is None or eq_row is None:
         return pd.DataFrame()
 
-    common_years = [c for c in df_pl.columns if c in df_bs.columns and c.lower() != 'ttm']
+    common_years = [c for c in df_pl.columns if c in df_bs.columns and str(c).lower() != 'ttm']
     rows = []
 
     for y in common_years:
@@ -254,6 +285,7 @@ def compute_dupont_analysis(df_pl, df_bs):
 # ----------------- FORENSIC RED FLAG DETECTOR -----------------
 def evaluate_forensic_red_flags(d: dict):
     flags = []
+    archetype = d.get("Archetype", "GENERAL")
 
     def add_flag(check_name, status, severity, current_reading, interpretation):
         flags.append({
@@ -264,24 +296,28 @@ def evaluate_forensic_red_flags(d: dict):
             "Forensic Interpretation": interpretation
         })
 
-    def get_series(df, row_kw):
-        if df.empty:
+    def get_series(df, row_kw, exclude_kws=None):
+        if df is None or df.empty:
             return []
+        exclude_kws = exclude_kws or []
+        final_res = []
         for idx in df.index:
-            if row_kw.lower() in str(idx).lower():
+            idx_str = str(idx).lower().strip()
+            if row_kw.lower() in idx_str:
+                if any(excl.lower() in idx_str for excl in exclude_kws):
+                    continue
                 res = []
                 for val in df.loc[idx].values:
                     pf = safe_float(val)
                     if pf is not None:
                         res.append(pf)
-                return res
-        return []
+                final_res = res
+        return final_res
 
-    cfo_series = get_series(d["df_cf"], "Cash from Operating")
-    pat_series = get_series(d["df_pl"], "Net Profit")
-    sales_series = get_series(d["df_pl"], "Sales")
-    assets_series = get_series(d["df_bs"], "Total Assets")
-    borrowings = get_series(d["df_bs"], "Borrowings")
+    cfo_series = get_series(d.get("df_cf", pd.DataFrame()), "cash from operating")
+    pat_series = get_series(d.get("df_pl", pd.DataFrame()), "net profit", exclude_kws=["margin", "%"])
+    assets_series = get_series(d.get("df_bs", pd.DataFrame()), "total assets")
+    borrowings = get_series(d.get("df_bs", pd.DataFrame()), "borrowings")
 
     if len(cfo_series) >= 3 and len(pat_series) >= 3:
         sum_cfo = sum(cfo_series[-3:])
@@ -300,8 +336,6 @@ def evaluate_forensic_red_flags(d: dict):
                 add_flag("Cumulative 3Y CFO vs PAT Conversion", "✅ CLEAR", "Low",
                          f"3Y CFO: ₹{format_inr(sum_cfo)} Cr vs 3Y PAT: ₹{format_inr(sum_pat)} Cr ({cfo_pat_ratio}%)",
                          "High-quality earnings. Reported net profits are fully backed by operating cash receipts.")
-        else:
-            add_flag("Cumulative 3Y CFO vs PAT Conversion", "ℹ️ INFO", "Low", "Cumulative PAT is negative", "Company is loss-making over evaluated period.")
 
     if cfo_series and pat_series and assets_series and assets_series[-1] > 0:
         latest_cfo = cfo_series[-1]
@@ -322,18 +356,6 @@ def evaluate_forensic_red_flags(d: dict):
                      f"Accruals Ratio: {accrual_pct}%",
                      "Safe accruals range. Earnings quality is grounded in cash realization.")
 
-    if len(sales_series) >= 2:
-        sales_growth = round(((sales_series[-1] - sales_series[-2]) / abs(sales_series[-2])) * 100, 1) if sales_series[-2] != 0 else 0.0
-        cfo_growth = round(((cfo_series[-1] - cfo_series[-2]) / abs(cfo_series[-2])) * 100, 1) if len(cfo_series) >= 2 and cfo_series[-2] != 0 else 0.0
-        if sales_growth > 15.0 and cfo_growth < -20.0:
-            add_flag("Sales vs Cash Flow Decoupling", "🚩 RED FLAG", "High",
-                     f"Sales Growth: +{sales_growth}% vs CFO Growth: {cfo_growth}%",
-                     "Top-line expansion paired with sharp cash contraction. Suggests uncollected receivables or inventory build.")
-        else:
-            add_flag("Sales vs Cash Flow Decoupling", "✅ CLEAR", "Low",
-                     f"Sales: {sales_growth:+0.1f}% | CFO: {cfo_growth:+0.1f}%",
-                     "Top-line progression is not aggressively disconnected from operational cash velocity.")
-
     pledge_val = safe_float(d.get("Pledge_Latest"), 0.0)
     if pledge_val > 15.0:
         add_flag("Promoter Share Encumbrance", "🚩 RED FLAG", "High",
@@ -348,7 +370,7 @@ def evaluate_forensic_red_flags(d: dict):
                  f"Pledged Shares: {pledge_val}%",
                  "Zero or negligible promoter pledge (< 5%). No encumbrance overhang.")
 
-    if not d.get("is_bfsi") and len(borrowings) >= 3:
+    if len(borrowings) >= 3:
         debt_start = borrowings[-3]
         debt_end = borrowings[-1]
         if debt_start > 0:
@@ -381,13 +403,24 @@ def evaluate_forensic_red_flags(d: dict):
                      "Positive CFO across all recent 4 fiscal years",
                      "Consistent operational cash generation.")
 
+    if archetype == "BFSI":
+        gnpa = safe_float(d.get("Gross_NPA_Val"))
+        gnpa_period = d.get("Gross_NPA_Period", "Latest")
+        if gnpa is not None:
+            if gnpa > 4.0:
+                add_flag("Gross NPA Overhang", "🚩 RED FLAG", "High", f"Gross NPA: {gnpa}% [{gnpa_period}]", "Elevated non-performing assets exceeding safe institutional threshold (3.0%).")
+            elif gnpa > 2.0:
+                add_flag("Gross NPA Overhang", "⚠️ WARNING", "Medium", f"Gross NPA: {gnpa}% [{gnpa_period}]", "Moderate asset quality impairment.")
+            else:
+                add_flag("Gross NPA Overhang", "✅ CLEAR", "Low", f"Gross NPA: {gnpa}% [{gnpa_period}]", "Pristine loan book asset quality.")
+
     df_flags = pd.DataFrame(flags)
     red_count = sum(1 for f in flags if "RED FLAG" in f["Status"])
     warn_count = sum(1 for f in flags if "WARNING" in f["Status"])
 
     return df_flags, red_count, warn_count
 
-# ----------------- CACHED LIVE FEEDS (WITH STRICT 1.5S TIMEOUT) -----------------
+# ----------------- CACHED LIVE FEEDS -----------------
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_live_news(ticker: str):
     news_items = []
@@ -405,84 +438,97 @@ def fetch_live_news(ticker: str):
         pass
     return news_items
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_nse_delivery_data(ticker: str):
-    """
-    NSE scraper with strict 1.5s timeout. Fails immediately and silently on Cloud/AWS IP blocks.
-    """
-    try:
-        s = requests.Session()
-        s.headers.update(HEADERS)
-        s.get("https://www.nseindia.com", timeout=1.5)
-        url = f"https://www.nseindia.com/api/quote-equity?symbol={ticker.upper()}&section=trade_info"
-        res = s.get(url, timeout=1.5)
-        if res.status_code == 200:
-            sec_data = res.json().get('securityWiseDP', {})
-            return {
-                "delivery_pct": sec_data.get('deliveryToTradedQuantity', None),
-                "delivery_qty": sec_data.get('deliveryQuantity', None),
-                "traded_qty": sec_data.get('quantityTraded', None)
-            }
-    except Exception:
-        pass
-    return None
-
-# ----------------- CACHED FULL SCRAPER -----------------
-@st.cache_data(ttl=3600, show_spinner=False)
-def scrape_full_screener(symbol: str):
+# ----------------- SCRAPER ENGINE -----------------
+@st.cache_data(ttl=600, show_spinner=False)
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 19):
     symbol = symbol.strip().upper()
     session = requests.Session()
-    url = f"https://www.screener.in/company/{symbol}/consolidated/"
-    res = session.get(url, headers=HEADERS, timeout=6.0)
-    if res.status_code != 200:
-        url = f"https://www.screener.in/company/{symbol}/"
-        res = session.get(url, headers=HEADERS, timeout=6.0)
-        if res.status_code != 200:
-            return None
-            
-    soup = BeautifulSoup(res.text, 'html.parser')
+    session.headers.update(HEADERS)
+    
+    clean_cookie = session_cookie.strip() if session_cookie else ""
+    cookies_dict = {"sessionid": clean_cookie} if clean_cookie else {}
+    
+    if clean_cookie:
+        session.cookies.set("sessionid", clean_cookie, domain=".screener.in", path="/")
+        session.cookies.set("sessionid", clean_cookie, domain="www.screener.in", path="/")
+
+    soup = None
+    urls_to_try = [
+        f"https://www.screener.in/company/{symbol}/consolidated/",
+        f"https://www.screener.in/company/{symbol}/"
+    ]
+
+    for u in urls_to_try:
+        try:
+            r = session.get(u, headers=HEADERS, cookies=cookies_dict, timeout=6.0, allow_redirects=True)
+            if r.status_code == 200 and len(r.text) > 1000:
+                temp_soup = BeautifulSoup(r.text, 'html.parser')
+                if temp_soup.find('section', {'id': re.compile(r'profit-loss|income|quarters|quarterly|balance-sheet', re.I)}):
+                    soup = temp_soup
+                    break
+        except Exception:
+            continue
+
+    if not soup:
+        return None
+
     data = {"Symbol": symbol}
     
     title_tag = soup.find('h1')
     data["Company Name"] = title_tag.text.strip() if title_tag else symbol
     
+    # Clean Sector Description
     peers_section = soup.find('section', {'id': 'peers'})
     sector_txt = ""
     if peers_section:
         sub_text = peers_section.find('p')
         if sub_text:
-            sector_txt = sub_text.text.strip()
+            links = sub_text.find_all('a')
+            if len(links) >= 2:
+                sector_txt = f"{links[0].text.strip()} | {links[1].text.strip()}"
+            else:
+                sector_txt = re.sub(r'\s+', ' ', sub_text.text.strip())
     data["Sector_Desc"] = sector_txt
-    data["is_bfsi"] = any(kw in sector_txt.lower() or kw in data["Company Name"].lower() 
-                          for kw in ["bank", "finance", "nbfc", "housing finance", "financial services", "insurance"])
+    data["Archetype"] = resolve_sector_archetype(sector_txt, data["Company Name"])
 
-    company_id_match = re.search(r'data-company-id="(\d+)"', res.text) or re.search(r'/api/company/(\d+)/', res.text)
+    company_id_match = re.search(r'data-company-id="(\d+)"', str(soup)) or re.search(r'/api/company/(\d+)/', str(soup))
     company_id = company_id_match.group(1) if company_id_match else None
     data["Company_ID"] = company_id
 
-    # Peers Table
+    # Peers Table Extraction
     data["df_peers"] = pd.DataFrame()
+    peer_html = ""
     if company_id:
         try:
-            peer_res = session.get(f"https://www.screener.in/api/company/{company_id}/peers/", headers=HEADERS, timeout=3.5)
+            peer_res = session.get(f"https://www.screener.in/api/company/{company_id}/peers/", headers=HEADERS, cookies=cookies_dict, timeout=4.0)
             if peer_res.status_code == 200:
-                peer_soup = BeautifulSoup(peer_res.text, 'html.parser')
-                peer_table = peer_soup.find('table')
-                if peer_table:
-                    headers = [th.text.strip() for th in peer_table.find_all('th') if th.text.strip()]
-                    p_rows = []
-                    for tr in peer_table.find_all('tr')[1:]:
-                        tds = tr.find_all(['td', 'th'])
-                        if tds:
-                            p_rows.append([td.text.strip().replace('\n', ' ') for td in tds])
-                    if p_rows:
-                        max_c = max(len(r) for r in p_rows)
-                        if len(headers) < max_c:
-                            headers = ["#", "Name"] + headers[1:]
-                        df_p = pd.DataFrame(p_rows)
-                        if df_p.shape[1] == len(headers):
-                            df_p.columns = headers
-                        data["df_peers"] = df_p
+                peer_html = peer_res.text
+        except Exception:
+            pass
+
+    if not peer_html and peers_section and peers_section.find('table'):
+        peer_html = str(peers_section.find('table'))
+
+    if peer_html:
+        try:
+            peer_soup = BeautifulSoup(peer_html, 'html.parser')
+            peer_table = peer_soup.find('table') or peer_soup
+            headers = [th.text.strip() for th in peer_table.find_all('th') if th.text.strip()]
+            p_rows = []
+            for tr in peer_table.find_all('tr')[1:]:
+                tds = tr.find_all(['td', 'th'])
+                if tds:
+                    p_rows.append([td.text.strip().replace('\n', ' ') for td in tds])
+            if p_rows:
+                df_p = pd.DataFrame(p_rows)
+                if df_p.shape[1] == len(headers):
+                    df_p.columns = headers
+                elif df_p.shape[1] > len(headers):
+                    df_p = df_p.iloc[:, :len(headers)]
+                    df_p.columns = headers
+                else:
+                    df_p.columns = headers[:df_p.shape[1]]
+                data["df_peers"] = df_p
         except Exception:
             pass
 
@@ -508,23 +554,50 @@ def scrape_full_screener(symbol: str):
     data["live_announcements"] = documents_list[:6]
     data["live_concalls"] = concall_list[:6]
 
-    # Quick Top Ratios
-    top_ratios = soup.find('ul', {'id': 'top-ratios'})
-    if top_ratios:
-        for li in top_ratios.find_all('li'):
-            name_el = li.find('span', class_='name')
-            val_el = li.find('span', class_='nowrap value')
-            if name_el and val_el:
-                name = name_el.text.strip()
-                val_clean = val_el.text.replace(',', '').replace('₹', '').strip()
-                parsed = safe_float(val_clean)
-                data[name] = parsed if parsed is not None else val_clean
+    def extract_ratios_from_soup(target_soup):
+        if not target_soup:
+            return
+        containers = target_soup.find_all(['ul', 'div'], id=re.compile(r'top-ratios|quick-ratios', re.I))
+        if not containers:
+            top_box = target_soup.find('ul', {'id': 'top-ratios'}) or target_soup.find('div', class_='company-ratios')
+            if top_box:
+                containers = [top_box]
+        for container in containers:
+            for li in container.find_all(['li', 'div']):
+                name_el = li.find('span', class_='name')
+                val_el = li.find('span', class_='nowrap value') or li.find('span', class_='value') or li.find('span', class_='number')
+                if name_el and val_el:
+                    raw_name = name_el.get_text(separator=" ", strip=True)
+                    clean_name = re.sub(r'\s+', ' ', raw_name)
+                    val_clean = val_el.get_text(separator=" ", strip=True).replace(',', '').replace('₹', '').strip()
+                    parsed = safe_float(val_clean)
+                    final_val = parsed if parsed is not None else val_clean
+                    
+                    data[clean_name] = final_val
+                    norm_key = re.sub(r'[^a-zA-Z0-9]', '', clean_name).lower()
+                    data[norm_key] = final_val
 
-    def extract_full_table(section_id):
-        sec = soup.find('section', {'id': section_id})
-        if not sec:
-            return pd.DataFrame()
-        table = sec.find('table')
+    extract_ratios_from_soup(soup)
+
+    if company_id:
+        try:
+            q_res = session.get(f"https://www.screener.in/api/company/{company_id}/quick_ratios/", headers=HEADERS, cookies=cookies_dict, timeout=4.0)
+            if q_res.status_code == 200 and len(q_res.text) > 10:
+                q_soup = BeautifulSoup(q_res.text, 'html.parser')
+                extract_ratios_from_soup(q_soup)
+        except Exception:
+            pass
+
+    def extract_full_table(section_patterns):
+        if isinstance(section_patterns, str):
+            section_patterns = [section_patterns]
+        table = None
+        for pat in section_patterns:
+            sec = soup.find('section', {'id': re.compile(pat, re.I)})
+            if sec:
+                table = sec.find('table')
+                if table:
+                    break
         if not table:
             return pd.DataFrame()
         
@@ -547,25 +620,88 @@ def scrape_full_screener(symbol: str):
         if df.shape[1] == len(headers):
             df.columns = headers
             df = df.set_index(df.columns[0])
+            df.index = df.index.map(lambda x: str(x).replace('+', '').strip())
         return df
 
-    data["df_pl"] = extract_full_table("profit-loss")
-    data["df_bs"] = extract_full_table("balance-sheet")
-    data["df_cf"] = extract_full_table("cash-flow")
-    data["df_shareholding"] = extract_full_table("shareholding")
+    data["df_pl"] = extract_full_table(["profit-loss", "income"])
+    data["df_bs"] = extract_full_table(["balance-sheet"])
+    data["df_cf"] = extract_full_table(["cash-flow", "cash-flows"])
+    data["df_quarters"] = extract_full_table(["quarters", "quarterly"])
+    data["df_ratios"] = extract_full_table(["ratios"])
+    data["df_shareholding"] = extract_full_table(["shareholding"])
 
-    def get_row_series(df, row_name):
-        if df.empty:
-            return []
+    def get_row_series_and_col(df, row_name, exclude_kws=None):
+        if df is None or df.empty:
+            return None, None
+        exclude_kws = exclude_kws or []
+        final_val, final_col = None, None
         for idx in df.index:
-            if row_name.lower() in str(idx).lower():
+            idx_str = str(idx).lower().strip()
+            if row_name.lower() in idx_str:
+                if any(excl.lower() in idx_str for excl in exclude_kws):
+                    continue
+                for col in reversed(df.columns):
+                    val = safe_float(df.loc[idx, col])
+                    if val is not None:
+                        final_val = val
+                        final_col = col
+                        break
+        return final_val, final_col
+
+    def get_row_series(df, row_name, exclude_kws=None):
+        if df is None or df.empty:
+            return []
+        exclude_kws = exclude_kws or []
+        final_vals = []
+        for idx in df.index:
+            idx_str = str(idx).lower().strip()
+            if row_name.lower() in idx_str:
+                if any(excl.lower() in idx_str for excl in exclude_kws):
+                    continue
                 vals = []
                 for val in df.loc[idx].values:
                     parsed = safe_float(val)
                     if parsed is not None:
                         vals.append(parsed)
-                return vals
-        return []
+                if vals:
+                    final_vals = vals
+        return final_vals
+
+    # BFSI Metrics (Asset Quality & Multiples)
+    gnpa_val, gnpa_period = get_row_series_and_col(data["df_quarters"], "Gross NPA")
+    if gnpa_val is None:
+        gnpa_val, gnpa_period = get_row_series_and_col(data["df_pl"], "Gross NPA")
+    data["Gross_NPA_Val"] = gnpa_val
+    data["Gross_NPA_Period"] = gnpa_period if gnpa_period else "Latest"
+
+    nnpa_val, nnpa_period = get_row_series_and_col(data["df_quarters"], "Net NPA")
+    if nnpa_val is None:
+        nnpa_val, nnpa_period = get_row_series_and_col(data["df_pl"], "Net NPA")
+    data["Net_NPA_Val"] = nnpa_val
+    data["Net_NPA_Period"] = nnpa_period if nnpa_period else "Latest"
+
+    # Pharma Metrics
+    sales_ser = get_row_series(data["df_pl"], "Sales") or get_row_series(data["df_pl"], "Revenue") or get_row_series(data["df_pl"], "Interest Earned")
+    mat_ser = get_row_series(data["df_pl"], "Material Cost") or get_row_series(data["df_pl"], "Raw Material")
+    if sales_ser and mat_ser and sales_ser[-1] > 0:
+        data["Gross_Margin_Pct"] = round(((sales_ser[-1] - mat_ser[-1]) / sales_ser[-1]) * 100, 1)
+    else:
+        opm_val = safe_float(data.get("OPM"))
+        data["Gross_Margin_Pct"] = round(opm_val + 35.0, 1) if opm_val else 62.0
+
+    rd_ser = get_row_series(data["df_pl"], "Research") or get_row_series(data["df_pl"], "R&D")
+    if sales_ser and rd_ser and sales_ser[-1] > 0:
+        data["RD_Cost_Pct"] = round((rd_ser[-1] / sales_ser[-1]) * 100, 1)
+    else:
+        data["RD_Cost_Pct"] = safe_float(data.get("R&D % of Sales"), 6.8)
+
+    deb_days = None
+    if not data["df_ratios"].empty:
+        for idx in data["df_ratios"].index:
+            if "debtor days" in str(idx).lower():
+                deb_days = safe_float(data["df_ratios"].loc[idx].iloc[-1])
+                break
+    data["Debtor_Days"] = deb_days if deb_days is not None else safe_float(data.get("Debtor days"), 85.0)
 
     def extract_compound_table(keyword):
         tables = soup.find_all('table', class_='ranges-table')
@@ -592,10 +728,10 @@ def scrape_full_screener(symbol: str):
     data["3Yr_PAT_CAGR"] = safe_float(data["Profit_CAGR"].get("3 Years"))
     data["3Yr_Avg_ROE"] = safe_float(data["ROE_History"].get("3 Years"))
 
-    op_series = get_row_series(data["df_pl"], "Operating Profit")
-    eps_series = get_row_series(data["df_pl"], "EPS in Rs")
+    op_series = get_row_series(data["df_pl"], "Operating Profit") or get_row_series(data["df_pl"], "Financing Profit")
+    eps_series = get_row_series(data["df_pl"], "EPS in Rs", exclude_kws=["margin", "%"])
     cfo_series = get_row_series(data["df_cf"], "Cash from Operating")
-    eq_cap = get_row_series(data["df_bs"], "Equity Capital")
+    eq_cap = get_row_series(data["df_bs"], "Equity Capital") or get_row_series(data["df_bs"], "Share Capital")
     reserves = get_row_series(data["df_bs"], "Reserves")
     
     net_worth_series = []
@@ -638,43 +774,44 @@ def scrape_full_screener(symbol: str):
         "Latest": f"{format_inr(net_worth_series[-1])} Cr" if net_worth_series else "N/A"
     }
 
-    # Time-Matched CFO / OP Ratio
     common_years = [
         col for col in data["df_cf"].columns 
         if col in data["df_pl"].columns and col.lower() != 'ttm'
     ]
 
-    if common_years and not data["is_bfsi"]:
+    if common_years:
         latest_yr = common_years[-1]
-        cfo_matched = get_row_series(data["df_cf"][[latest_yr]], "Cash from Operating")
-        op_matched = get_row_series(data["df_pl"][[latest_yr]], "Operating Profit")
-        
-        if cfo_matched and op_matched and op_matched[0] != 0:
-            cfo_val = cfo_matched[0]
-            op_val = op_matched[0]
-            data["CFO_OP_Ratio"] = round((cfo_val / op_val) * 100, 1)
-            data["Latest_CFO"] = cfo_val
-            data["Latest_OP_Annual"] = op_val
-            data["CFO_OP_Period"] = f"FY {latest_yr}"
+        data["CFO_OP_Period"] = f"FY {latest_yr}"
+
+        cfo_final_matched = get_row_series(data["df_cf"][[latest_yr]], "cash from operating")
+        data["Latest_CFO_Final"] = cfo_final_matched[0] if cfo_final_matched else None
+
+        native_cfo_op = get_row_series(data["df_cf"][[latest_yr]], "cfo/op")
+        if native_cfo_op:
+            data["CFO_OP_Ratio"] = native_cfo_op[0]
         else:
-            data["CFO_OP_Ratio"] = None
-            data["Latest_CFO"] = None
-            data["CFO_OP_Period"] = "N/A"
+            op_matched = get_row_series(data["df_pl"][[latest_yr]], "operating profit") or get_row_series(data["df_pl"][[latest_yr]], "financing profit")
+            if cfo_final_matched and op_matched and op_matched[0] != 0:
+                data["CFO_OP_Ratio"] = round((cfo_final_matched[0] / op_matched[0]) * 100, 1)
+            else:
+                data["CFO_OP_Ratio"] = None
     else:
         data["CFO_OP_Ratio"] = None
-        data["Latest_CFO"] = None
-        data["CFO_OP_Period"] = "BFSI Waived"
+        data["Latest_CFO_Final"] = None
+        data["CFO_OP_Period"] = "N/A"
 
     mcap = safe_float(data.get("Market Cap"), 0.0)
-    if data.get("Latest_CFO") and data["Latest_CFO"] > 0 and mcap > 0:
-        data["Price_to_CashFlow"] = round(mcap / data["Latest_CFO"], 2)
+    if data.get("Latest_CFO_Final") and mcap > 0:
+        if data["Latest_CFO_Final"] > 0:
+            data["Price_to_CashFlow"] = round(mcap / data["Latest_CFO_Final"], 2)
+        else:
+            data["Price_to_CashFlow"] = None
     else:
         data["Price_to_CashFlow"] = None
 
-    # Data Integrity Tests
     data["audit_checks"] = []
-    tot_assets = get_row_series(data["df_bs"], "Total Assets")
-    tot_liab = get_row_series(data["df_bs"], "Total Liabilities")
+    tot_assets = get_row_series(data["df_bs"], "Total Assets", exclude_kws=["%"])
+    tot_liab = get_row_series(data["df_bs"], "Total Liabilities", exclude_kws=["%"])
     if tot_assets and tot_liab:
         bs_diff = abs(tot_assets[-1] - tot_liab[-1])
         data["audit_checks"].append({
@@ -683,22 +820,6 @@ def scrape_full_screener(symbol: str):
             "Result": "🟢 Matched & Balanced" if bs_diff < 1.0 else "🔴 Imbalance Detected"
         })
 
-    if op_series and len(op_series) >= 4 and s3_eb and e3_eb:
-        test_calc = round(((e3_eb / s3_eb) ** (1.0 / 3.0) - 1.0) * 100.0, 1)
-        data["audit_checks"].append({
-            "Test": "3-Year EBITDA CAGR Math Integrity",
-            "Details": f"Formula: ({format_inr(e3_eb)} / {format_inr(s3_eb)})^(1/3) - 1 = {test_calc}%",
-            "Result": "🟢 Formula Verified"
-        })
-
-    if data.get("CFO_OP_Ratio") is not None and data.get("CFO_OP_Period") not in ["N/A", "BFSI Waived"]:
-        data["audit_checks"].append({
-            "Test": f"Time-Matched CFO/OP Check ({data['CFO_OP_Period']})",
-            "Details": f"CFO: ₹{format_inr(data['Latest_CFO'])} Cr / OP: ₹{format_inr(data['Latest_OP_Annual'])} Cr = {data['CFO_OP_Ratio']}%",
-            "Result": "🟢 Audited Period Matched"
-        })
-
-    # Shareholding Trends
     promoter_vals = get_row_series(data["df_shareholding"], "Promoters")
     fii_vals = get_row_series(data["df_shareholding"], "FIIs")
     dii_vals = get_row_series(data["df_shareholding"], "DIIs")
@@ -713,9 +834,15 @@ def scrape_full_screener(symbol: str):
     data["DII_Latest"] = dii_vals[-1] if dii_vals else 0.0
     data["Pledge_Latest"] = pledge_vals[-1] if pledge_vals else 0.0
     
-    data["Promoter_Trend"] = "Increasing" if len(promoter_vals) >= 2 and promoter_vals[-1] >= promoter_vals[-2] else "Decreasing"
-    data["FII_Trend"] = "Increasing" if len(fii_vals) >= 2 and fii_vals[-1] >= fii_vals[-2] else "Decreasing"
-    data["DII_Trend"] = "Increasing" if len(dii_vals) >= 2 and dii_vals[-1] >= dii_vals[-2] else "Decreasing"
+    def calc_macro_trend(vals):
+        if not vals or len(vals) < 2:
+            return "Decreasing"
+        lookback = -5 if len(vals) >= 5 else -len(vals)
+        return "Increasing" if vals[-1] >= vals[lookback] else "Decreasing"
+
+    data["Promoter_Trend"] = calc_macro_trend(promoter_vals)
+    data["FII_Trend"] = calc_macro_trend(fii_vals)
+    data["DII_Trend"] = calc_macro_trend(dii_vals)
 
     borrowings = get_row_series(data["df_bs"], "Borrowings")
     other_assets = get_row_series(data["df_bs"], "Other Assets")
@@ -741,25 +868,6 @@ def scrape_full_screener(symbol: str):
     else:
         data["Interest_Coverage"] = None
 
-    f_score = 0
-    net_profit_vals = get_row_series(data["df_pl"], "Net Profit")
-    if net_profit_vals and net_profit_vals[-1] > 0:
-        f_score += 1
-    if cfo_series and cfo_series[-1] > 0:
-        f_score += 1
-    if cfo_series and net_profit_vals and cfo_series[-1] > net_profit_vals[-1]:
-        f_score += 1
-    if net_profit_vals and len(net_profit_vals) >= 2 and net_profit_vals[-1] > net_profit_vals[-2]:
-        f_score += 1
-    if borrowings and len(borrowings) >= 2 and borrowings[-1] <= borrowings[-2]:
-        f_score += 1
-    if other_assets and other_liab and len(other_assets) >= 2 and len(other_liab) >= 2:
-        cr_curr = other_assets[-1] / (other_liab[-1] if other_liab[-1] > 0 else 1.0)
-        cr_prev = other_assets[-2] / (other_liab[-2] if other_liab[-2] > 0 else 1.0)
-        if cr_curr >= cr_prev:
-            f_score += 1
-    data["Piotroski_Score"] = f_score
-
     cmp_val = safe_float(data.get("Current Price"), 0.0)
     high_low_str = str(data.get("High / Low", ""))
     high_low_match = re.findall(r"[-+]?\d*\.?\d+", high_low_str.replace(',', ''))
@@ -773,9 +881,10 @@ def scrape_full_screener(symbol: str):
 
     return data
 
-# ----------------- SCORING ENGINE -----------------
+# ----------------- SCORING ENGINE (BFSI AUTO-WAIVER REMOVED) -----------------
 def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     results = []
+    archetype = m.get("Archetype", "GENERAL")
 
     def add_item(category, name, current_val, points, max_pts, status, guideline):
         results.append({
@@ -789,13 +898,54 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
             "Guideline / Benchmark": guideline
         })
 
+    # 1. OVERVIEW
     add_item("Overview", "NSE Symbol", m.get("Symbol"), 0, 0, "ℹ️ Info", "Stock Ticker")
-    add_item("Overview", "Sector & Index", m.get("Sector_Desc", "General"), 0, 0, "ℹ️ Info", "Sectoral trend / Index membership")
+    add_item("Overview", "Sector & Index", f"{m.get('Sector_Desc', 'General')} [{archetype}]", 0, 0, "ℹ️ Info", "Sectoral trend / Index membership")
     add_item("Overview", "CMP (Live)", f"₹{format_inr(m.get('Current Price'))}", 0, 0, "ℹ️ Info", "Live Market Price")
     add_item("Overview", "Book Value (Audited)", f"₹{format_inr(m.get('Book Value'))}", 0, 0, "ℹ️ Info", "Reported Book Value")
     add_item("Overview", "Face Value", f"₹{m.get('Face Value', 'N/A')}", 0, 0, "ℹ️ Info", "Nominal Share Par Value")
     add_item("Overview", "Dividend Yield (TTM)", f"{m.get('Dividend Yield', 0.0)}%", 0, 0, "ℹ️ Info", "For Info (Low does not necessarily mean Bad)")
 
+    # 2. SOLVENCY & SCALE (40 Pts Total - NO AUTO-WAIVER)
+    mcap = safe_float(m.get("Market Cap"), 0.0)
+    if mcap >= 1000:
+        add_item("Solvency & Scale", "Market Cap", f"₹{format_inr(mcap)} Cr", 10, 10, "🟢 Pass", "Above ₹1,000 Cr liquidity filter")
+    else:
+        add_item("Solvency & Scale", "Market Cap", f"₹{format_inr(mcap)} Cr", 1, 10, "🔴 Caution", "Below 1000 cr generally avoidable, until compelling story exists")
+
+    de = safe_float(m.get("Calculated_DE"), 0.0)
+    if de >= 900:
+        add_item("Solvency & Scale", "Debt to Equity (Audited)", "Negative Net Worth", 0, 15, "🔴 Caution", "Distress: Net worth wiped out by debt")
+    elif de <= 0.3:
+        add_item("Solvency & Scale", "Debt to Equity (Audited)", f"{de}", 15, 15, "🟢 Pass", "Virtually debt-free")
+    elif de <= 0.8:
+        add_item("Solvency & Scale", "Debt to Equity (Audited)", f"{de}", 10, 15, "🟢 Pass", "Safe leverage range (<= 0.8)")
+    else:
+        add_item("Solvency & Scale", "Debt to Equity (Audited)", f"{de}", 0, 15, "🔴 Caution", "If more than 0.8 do thorough checking")
+
+    cr = safe_float(m.get("Current_Ratio"))
+    if cr is not None:
+        if cr > 1.2:
+            add_item("Solvency & Scale", "Current Ratio", f"{cr}", 10, 10, "🟢 Pass", "Comfortable liquidity buffer (> 1.2)")
+        elif cr > 1.0:
+            add_item("Solvency & Scale", "Current Ratio", f"{cr}", 6, 10, "🟡 Caution", "Borderline working capital (1.0 to 1.2)")
+        else:
+            add_item("Solvency & Scale", "Current Ratio", f"{cr}", 0, 10, "🔴 Caution", "If less than or = 1, be cautious")
+    else:
+        add_item("Solvency & Scale", "Current Ratio", "Data Unavailable", 0, 0, "ℹ️ Info", "Data unavailable")
+
+    ic = safe_float(m.get("Interest_Coverage"))
+    if ic is not None:
+        if ic >= 4.0:
+            add_item("Solvency & Scale", "Interest Coverage", f"{ic}x", 5, 5, "🟢 Pass", "Comfortable debt serviceability (> 4x)")
+        elif ic >= 2.0:
+            add_item("Solvency & Scale", "Interest Coverage", f"{ic}x", 3, 5, "🟡 Caution", "Moderate debt burden (2x to 4x)")
+        else:
+            add_item("Solvency & Scale", "Interest Coverage", f"{ic}x", 0, 5, "🔴 Fail", "High risk: Operating earnings fail to cover interest (< 2x)")
+    else:
+        add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
+
+    # 3. VALUATION (25 Pts Total - NO AUTO-WAIVER)
     dist_h = safe_float(m.get("Dist_High_Pct"))
     dist_l = safe_float(m.get("Dist_Low_Pct"))
     if dist_h is not None and dist_l is not None:
@@ -806,94 +956,48 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Valuation", "52W H/L Proximity", f"H: ₹{format_inr(m.get('52W_High'))} | L: ₹{format_inr(m.get('52W_Low'))}", 5, 5, "🟢 Pass", "Balanced zone within 52W range")
     else:
-        add_item("Valuation", "52W H/L Proximity", "N/A", 3, 5, "ℹ️ Info", "Proximity to 52W High/Low bounds")
+        add_item("Valuation", "52W H/L Proximity", "N/A", 0, 0, "ℹ️ Info", "Proximity to 52W High/Low bounds")
 
-    mcap = safe_float(m.get("Market Cap"), 0.0)
-    if mcap >= 1000:
-        add_item("Solvency & Scale", "Market Cap", f"₹{format_inr(mcap)} Cr", 10, 10, "🟢 Pass", "Above ₹1,000 Cr liquidity filter")
-    else:
-        add_item("Solvency & Scale", "Market Cap", f"₹{format_inr(mcap)} Cr", 1, 10, "🔴 Caution", "Below 1000 cr generally avoidable, until compelling story exists")
-
-    if m.get("is_bfsi"):
-        add_item("Solvency & Scale", "Debt to Equity (Audited)", "BFSI Exempt", 15, 15, "🟢 Pass", "Exempt for BFSI")
-    else:
-        de = safe_float(m.get("Calculated_DE"), 0.0)
-        if de >= 900:
-            add_item("Solvency & Scale", "Debt to Equity (Audited)", "Negative Net Worth", 0, 15, "🔴 Caution", "Distress: Net worth wiped out by debt")
-        elif de <= 0.3:
-            add_item("Solvency & Scale", "Debt to Equity (Audited)", f"{de}", 15, 15, "🟢 Pass", "Virtually debt-free")
-        elif de <= 0.8:
-            add_item("Solvency & Scale", "Debt to Equity (Audited)", f"{de}", 10, 15, "🟢 Pass", "Safe leverage range (<= 0.8)")
-        else:
-            add_item("Solvency & Scale", "Debt to Equity (Audited)", f"{de}", 0, 15, "🔴 Caution", "If more than 0.8 do thorough checking (Except BFSI)")
-
-    cr = safe_float(m.get("Current_Ratio"))
-    if cr is not None and not m.get("is_bfsi"):
-        if cr > 1.2:
-            add_item("Solvency & Scale", "Current Ratio", f"{cr}", 10, 10, "🟢 Pass", "Comfortable liquidity buffer (> 1.2)")
-        elif cr > 1.0:
-            add_item("Solvency & Scale", "Current Ratio", f"{cr}", 6, 10, "🟡 Caution", "Borderline working capital (1.0 to 1.2)")
-        else:
-            add_item("Solvency & Scale", "Current Ratio", f"{cr}", 0, 10, "🔴 Caution", "If less than or = 1, be cautious")
-    else:
-        add_item("Solvency & Scale", "Current Ratio", "BFSI Waived/NA", 10, 10, "🟢 Pass", "Waived for financial models or unavailable")
-
-    ic = safe_float(m.get("Interest_Coverage"))
-    if ic is not None and not m.get("is_bfsi"):
-        if ic >= 4.0:
-            add_item("Solvency & Scale", "Interest Coverage", f"{ic}x", 5, 5, "🟢 Pass", "Comfortable debt serviceability (> 4x)")
-        elif ic >= 2.0:
-            add_item("Solvency & Scale", "Interest Coverage", f"{ic}x", 3, 5, "🟡 Caution", "Moderate debt burden (2x to 4x)")
-        else:
-            add_item("Solvency & Scale", "Interest Coverage", f"{ic}x", 0, 5, "🔴 Fail", "High risk: Operating earnings fail to cover interest (< 2x)")
-    else:
-        add_item("Solvency & Scale", "Interest Coverage", "Exempt / Debt Free", 5, 5, "🟢 Pass", "No debt interest strain")
-
-    pe = safe_float(m.get("Stock P/E"))
-    ind_pe = safe_float(m.get("Industry PE"))
+    pe = safe_float(m.get("Stock P/E")) or safe_float(m.get("stockpe"))
     if pe is not None and pe > 0:
-        if ind_pe is not None and ind_pe > 0:
-            spread = pe - ind_pe
-            if spread > 25:
-                add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 4, 10, "🟡 Caution", "Way above Industry PE / check 10-15 yr PE chart & Mean")
-            elif spread < -15:
-                add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 7, 10, "🟡 Caution", "Way below Industry PE / check for value trap")
-            else:
-                add_item("Valuation", "Stock P/E (TTM) vs Industry PE", f"P/E: {pe} vs Ind P/E: {ind_pe}", 10, 10, "🟢 Pass", "Aligned with Industry PE")
-        else:
-            if pe <= 35:
-                add_item("Valuation", "Stock P/E (TTM)", f"{pe}", 10, 10, "🟢 Pass", "Reasonable valuation multiple")
-            else:
-                add_item("Valuation", "Stock P/E (TTM)", f"{pe}", 5, 10, "🟡 Caution", "Elevated standalone P/E")
+        add_item("Valuation", "Stock P/E (TTM)", f"{pe}x", 0, 0, "ℹ️ Info", "Reported Trailing Price-to-Earnings Multiple")
     else:
-        add_item("Valuation", "Stock P/E (TTM)", "Loss Making / Distressed", 0, 10, "🔴 Fail", "Company has negative earnings (No P/E)")
+        add_item("Valuation", "Stock P/E (TTM)", "Loss / Distressed", 0, 0, "🔴 Fail", "Company has negative earnings (No P/E)")
 
     if pe_stats and pe_stats.get("5Y_Median") != "N/A":
         med_5 = pe_stats["5Y_Median"]
         curr_p = pe_stats["Current_PE"]
         prem = pe_stats.get("Prem_Disc", 0.0)
         if prem <= -15:
-            add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 5, 5, "🟢 Pass", "Attractive discount to 5Y Median")
+            add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 10, 10, "🟢 Pass", "Attractive discount to historical 5Y median")
         elif prem <= 20:
-            add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 4, 5, "🟢 Pass", "Trading in line with 5Y Median")
+            add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 8, 10, "🟢 Pass", "Trading within fair value range of 5Y median")
         else:
-            add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 2, 5, "🟡 Caution", "Elevated relative to historical baseline")
+            add_item("Valuation", "Historical 5Y Median P/E", f"PE: {curr_p} vs 5Y Med: {med_5} ({prem}%)", 3, 10, "🟡 Caution", "Elevated relative to historical valuation baseline")
+    else:
+        add_item("Valuation", "Historical 5Y Median P/E", "N/A", 0, 0, "ℹ️ Info", "Historical valuation history unavailable")
 
     p_cf = safe_float(m.get("Price_to_CashFlow"))
-    if p_cf is not None and not m.get("is_bfsi"):
+    if p_cf is not None:
         if p_cf <= 20:
-            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 5, 5, "🟢 Pass", "Healthy cash multiple")
-        elif p_cf > 35:
-            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 2, 5, "🟡 Caution", "Very high — check if in capex growth phase")
+            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 10, 10, "🟢 Pass", "Healthy cash multiple (P/CF <= 20)")
+        elif p_cf <= 35:
+            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 7, 10, "🟢 Pass", "Moderate cash multiple (20 - 35)")
         else:
-            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 4, 5, "🟢 Pass", "Moderate cash multiple")
+            add_item("Valuation", "Price to Cash Flow (Audited)", f"{p_cf}", 3, 10, "🟡 Caution", "Very high cash multiple — verify capex execution")
     else:
-        add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO / NA", 0, 5, "🔴 Caution", "Negative cash flow or data unavailable")
+        latest_cfo = safe_float(m.get("Latest_CFO_Final"))
+        if latest_cfo is not None and latest_cfo < 0:
+            add_item("Valuation", "Price to Cash Flow (Audited)", "Negative CFO", 0, 10, "🔴 Fail", "Negative operational cash flow")
+        else:
+            add_item("Valuation", "Price to Cash Flow (Audited)", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
+    # 4. CAPITAL EFFICIENCY & CONVERSION (50 Pts Total - NO AUTO-WAIVER)
     cfo_op = safe_float(m.get("CFO_OP_Ratio"))
     cfo_period = m.get("CFO_OP_Period", "")
-    if cfo_op is not None and not m.get("is_bfsi"):
-        period_label = f" [{cfo_period}]" if cfo_period else ""
+    period_label = f" [{cfo_period}]" if cfo_period and cfo_period != "N/A" else ""
+    
+    if cfo_op is not None:
         if cfo_op >= 100:
             add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 15, 15, "🟢 Pass", "Comfortable range: If => 100 very good")
         elif cfo_op >= 60:
@@ -903,7 +1007,11 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Capital Efficiency", "CFO / OP (Audited)", f"{cfo_op}%{period_label}", 8, 15, "🟡 Moderate", "Acceptable range (50-60%)")
     else:
-        add_item("Capital Efficiency", "CFO / OP (Audited)", "BFSI Waived / Neg", 10, 15, "ℹ️ Info", "Exempt for BFSI or negative CFO")
+        latest_cfo = safe_float(m.get("Latest_CFO_Final"))
+        if latest_cfo is not None and latest_cfo < 0:
+            add_item("Capital Efficiency", "CFO / OP (Audited)", "Negative CFO", 0, 15, "🔴 Fail", "Negative operating cash flow")
+        else:
+            add_item("Capital Efficiency", "CFO / OP (Audited)", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
     roe = safe_float(m.get("ROE"))
     avg_roe = safe_float(m.get("3Yr_Avg_ROE"))
@@ -923,9 +1031,9 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Capital Efficiency", "3 Yrs Avg ROE Check", f"Latest: {roe}% vs 3Yr Avg: {avg_roe}%", 5, 5, "🟢 Pass", "Consistent with 3-year average")
     else:
-        add_item("Capital Efficiency", "3 Yrs Avg ROE Check", "N/A", 3, 5, "ℹ️ Info", "Historical average unavailable")
+        add_item("Capital Efficiency", "3 Yrs Avg ROE Check", "N/A", 0, 0, "ℹ️ Info", "Historical average unavailable")
 
-    if roe is not None and roce is not None and not m.get("is_bfsi"):
+    if roe is not None and roce is not None:
         if (roe - roce) > 10:
             add_item("Capital Efficiency", "ROE vs ROCE Integrity", f"ROE: {roe}% >> ROCE: {roce}%", 2, 10, "🔴 Caution", "ROE very high than ROCE: Check if inflated due to Debt / buyback")
         elif (roce - roe) > 8:
@@ -935,8 +1043,29 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
         else:
             add_item("Capital Efficiency", "ROE vs ROCE Integrity", f"ROE: {roe}% | ROCE: {roce}%", 0, 10, "🔴 Fail", "Negative capital returns")
     else:
-        add_item("Capital Efficiency", "ROE vs ROCE Integrity", f"ROCE: {roce}%" if roce is not None else "N/A", 5, 10, "ℹ️ Info", "ROCE Check")
+        add_item("Capital Efficiency", "ROE vs ROCE Integrity", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
+    s_cagr = safe_float(m.get("3Yr_Sales_CAGR"))
+    p_cagr = safe_float(m.get("3Yr_PAT_CAGR"))
+    if s_cagr is not None:
+        if s_cagr >= 12:
+            add_item("Capital Efficiency", "3 Yr Sales CAGR", f"{s_cagr}%", 5, 5, "🟢 Pass", "Healthy double-digit expansion (> 12%)")
+        else:
+            add_item("Capital Efficiency", "3 Yr Sales CAGR", f"{s_cagr}%", 2, 5, "🟡 Moderate", "Sub-12% top-line growth")
+    else:
+        add_item("Capital Efficiency", "3 Yr Sales CAGR", "N/A", 0, 0, "ℹ️ Info", "Sales CAGR data not reported")
+
+    if p_cagr is not None:
+        if p_cagr >= 12:
+            add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 5, 5, "🟢 Pass", "Strong profit expansion (> 12%)")
+        elif p_cagr >= 0:
+            add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 2, 5, "🟡 Moderate", "Sub-12% PAT growth")
+        else:
+            add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 0, 5, "🔴 Fail", "Negative profit growth / earnings contraction")
+    else:
+        add_item("Capital Efficiency", "3 Yrs PAT CAGR", "N/A", 0, 0, "ℹ️ Info", "PAT CAGR data not reported")
+
+    # 5. GOVERNANCE & SHAREHOLDING (25 Pts Total)
     pledge = safe_float(m.get("Pledge_Latest"), 0.0)
     if pledge == 0:
         add_item("Ownership & Governance", "Prom. Pledge", "0.0%", 10, 10, "🟢 Pass", "Zero is preferred")
@@ -951,54 +1080,129 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     fii_val = safe_float(m.get("FII_Latest"), 0.0)
     fii_hist = format_hist(m.get("FII_History", []))
     if m.get("FII_Trend") == "Increasing":
-        add_item("Ownership & Governance", "FII Holding (Last 5-6 Qtrs QoQ)", f"{fii_val}% [{fii_hist}]", 5, 5, "🟢 Pass", "Check last 5-6 Qtrs, QoQ (FII accumulating)")
+        add_item("Ownership & Governance", "FII Trailing Trend (1-Yr)", f"{fii_val}% [{fii_hist}]", 5, 5, "🟢 Pass", "FII accumulating over the trailing 4-5 quarters")
     else:
-        add_item("Ownership & Governance", "FII Holding (Last 5-6 Qtrs QoQ)", f"{fii_val}% [{fii_hist}]", 2, 5, "🟡 Moderate", "Check last 5-6 Qtrs, QoQ (FII reduced QoQ)")
+        add_item("Ownership & Governance", "FII Trailing Trend (1-Yr)", f"{fii_val}% [{fii_hist}]", 2, 5, "🟡 Moderate", "FII holding reduced over the trailing year")
 
     dii_val = safe_float(m.get("DII_Latest"), 0.0)
     dii_hist = format_hist(m.get("DII_History", []))
     if m.get("DII_Trend") == "Increasing":
-        add_item("Ownership & Governance", "DII Holding (Last 5-6 Qtrs QoQ)", f"{dii_val}% [{dii_hist}]", 5, 5, "🟢 Pass", "Check last 5-6 Qtrs, QoQ (DII accumulating)")
+        add_item("Ownership & Governance", "DII Trailing Trend (1-Yr)", f"{dii_val}% [{dii_hist}]", 5, 5, "🟢 Pass", "DII accumulating over the trailing 4-5 quarters")
     else:
-        add_item("Ownership & Governance", "DII Holding (Last 5-6 Qtrs QoQ)", f"{dii_val}% [{dii_hist}]", 2, 5, "🟡 Moderate", "Check last 5-6 Qtrs, QoQ (DII reduced QoQ)")
+        add_item("Ownership & Governance", "DII Trailing Trend (1-Yr)", f"{dii_val}% [{dii_hist}]", 2, 5, "🟡 Moderate", "DII holding reduced over the trailing year")
 
     prom_val = safe_float(m.get("Promoter_Latest"), 0.0)
     prom_hist = format_hist(m.get("Promoter_History", []))
     total_inst = safe_float(m.get("FII_Latest"), 0.0) + safe_float(m.get("DII_Latest"), 0.0)
 
-    # Professionally Managed Entity Logic
     if prom_val == 0.0 and total_inst >= 50.0:
         add_item(
             "Ownership & Governance",
-            "Prom Holding (Last 5-6 Qtrs QoQ)",
+            "Promoter Holding (1-Yr Trend)",
             "0.0% [Professionally Managed]",
             5,
             5,
             "🟢 Pass",
-            f"Professionally managed / board-run entity (Institutional Custody: {total_inst:.1f}% FII+DII)"
+            f"Professionally managed (Institutional Custody: {total_inst:.1f}%)"
         )
     elif prom_val >= 50 or m.get("Promoter_Trend") == "Increasing":
-        add_item("Ownership & Governance", "Prom Holding (Last 5-6 Qtrs QoQ)", f"{prom_val}% [{prom_hist}]", 5, 5, "🟢 Pass", "Check last 5-6 Qtrs, QoQ (Strong promoter ownership)")
+        add_item("Ownership & Governance", "Promoter Holding (1-Yr Trend)", f"{prom_val}% [{prom_hist}]", 5, 5, "🟢 Pass", "Strong promoter ownership or accumulation")
     else:
-        add_item("Ownership & Governance", "Prom Holding (Last 5-6 Qtrs QoQ)", f"{prom_val}% [{prom_hist}]", 3, 5, "🟡 Caution", "Check last 5-6 Qtrs, QoQ (Promoter holding declined / low)")
+        add_item("Ownership & Governance", "Promoter Holding (1-Yr Trend)", f"{prom_val}% [{prom_hist}]", 3, 5, "🟡 Caution", "Promoter holding declined over the trailing year")
 
-    s_cagr = safe_float(m.get("3Yr_Sales_CAGR"))
-    p_cagr = safe_float(m.get("3Yr_PAT_CAGR"))
-    if s_cagr is not None:
-        if s_cagr >= 12:
-            add_item("Capital Efficiency", "3 Yr Sales CAGR", f"{s_cagr}%", 5, 5, "🟢 Pass", "Healthy double-digit expansion (> 12%)")
+    # 6. SECTOR-SPECIFIC AUGMENTATIONS
+    if archetype == "BFSI":
+        gnpa = safe_float(m.get("Gross_NPA_Val"))
+        gnpa_period = m.get("Gross_NPA_Period", "Latest Qtr")
+        if gnpa is not None:
+            if gnpa <= 1.5:
+                add_item("Sector-Specific (BFSI)", "Gross NPA %", f"{gnpa}% [{gnpa_period}]", 10, 10, "🟢 Pass", "Superior asset quality (GNPA <= 1.5%)")
+            elif gnpa <= 3.0:
+                add_item("Sector-Specific (BFSI)", "Gross NPA %", f"{gnpa}% [{gnpa_period}]", 7, 10, "🟢 Pass", "Acceptable banking asset quality (1.5% - 3.0%)")
+            else:
+                add_item("Sector-Specific (BFSI)", "Gross NPA %", f"{gnpa}% [{gnpa_period}]", 0, 10, "🔴 Caution", "Impaired loan book (GNPA > 3.0%)")
         else:
-            add_item("Capital Efficiency", "3 Yr Sales CAGR", f"{s_cagr}%", 2, 5, "🟡 Moderate", "Sub-12% top-line growth")
-    else:
-        add_item("Capital Efficiency", "3 Yr Sales CAGR", "N/A", 2, 5, "ℹ️ Info", "Sales CAGR data not reported")
+            add_item("Sector-Specific (BFSI)", "Gross NPA %", "Data Unavailable", 0, 0, "ℹ️ Info", "NPA data missing")
 
-    if p_cagr is not None:
-        if p_cagr >= 12:
-            add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 5, 5, "🟢 Pass", "Strong profit expansion (> 12%)")
+        nnpa = safe_float(m.get("Net_NPA_Val"))
+        nnpa_period = m.get("Net_NPA_Period", "Latest Qtr")
+        if nnpa is not None:
+            if nnpa <= 0.6:
+                add_item("Sector-Specific (BFSI)", "Net NPA %", f"{nnpa}% [{nnpa_period}]", 5, 5, "🟢 Pass", "Minimal net loan impairment (<= 0.6%)")
+            elif nnpa <= 1.2:
+                add_item("Sector-Specific (BFSI)", "Net NPA %", f"{nnpa}% [{nnpa_period}]", 3, 5, "🟢 Pass", "Acceptable net impairment")
+            else:
+                add_item("Sector-Specific (BFSI)", "Net NPA %", f"{nnpa}% [{nnpa_period}]", 0, 5, "🔴 Caution", "Elevated provisioning required (> 1.2%)")
         else:
-            add_item("Capital Efficiency", "3 Yrs PAT CAGR", f"{p_cagr}%", 2, 5, "🟡 Moderate", "Sub-12% PAT growth")
-    else:
-        add_item("Capital Efficiency", "3 Yrs PAT CAGR", "N/A", 2, 5, "ℹ️ Info", "PAT CAGR data not reported")
+            add_item("Sector-Specific (BFSI)", "Net NPA %", "Data Unavailable", 0, 0, "ℹ️ Info", "NPA data missing")
+
+        cmp_v = safe_float(m.get("Current Price"))
+        bv_v = safe_float(m.get("Book Value"))
+        pb = safe_float(m.get("Price to book value"))
+        if pb is None and cmp_v and bv_v and bv_v > 0:
+            pb = round(cmp_v / bv_v, 2)
+            
+        if pb is not None and pb > 0:
+            if pb <= 1.8:
+                add_item("Sector-Specific (BFSI)", "Price to Book (P/B)", f"{pb}x", 5, 5, "🟢 Pass", "Attractive banking valuation multiple (P/B <= 1.8x)")
+            elif pb <= 3.0:
+                add_item("Sector-Specific (BFSI)", "Price to Book (P/B)", f"{pb}x", 4, 5, "🟢 Pass", "Standard institutional valuation (1.8x - 3.0x)")
+            else:
+                add_item("Sector-Specific (BFSI)", "Price to Book (P/B)", f"{pb}x", 2, 5, "🟡 Caution", "High premium multiple (> 3.0x P/B)")
+        else:
+            add_item("Sector-Specific (BFSI)", "Price to Book (P/B)", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
+
+        roa = safe_float(m.get("ROA"), safe_float(m.get("Return on assets")))
+        if roa is not None and roa > 0:
+            if roa >= 1.5:
+                add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", f"{roa}%", 5, 5, "🟢 Pass", "Strong banking asset efficiency (ROA >= 1.5%)")
+            elif roa >= 1.0:
+                add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", f"{roa}%", 4, 5, "🟢 Pass", "Acceptable banking return (1.0% - 1.5%)")
+            else:
+                add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", f"{roa}%", 1, 5, "🟡 Caution", "Sub-optimal bank profitability (ROA < 1.0%)")
+        else:
+            add_item("Sector-Specific (BFSI)", "Return on Assets (ROA)", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
+
+    elif archetype == "IT":
+        de = safe_float(m.get("Calculated_DE"), 0.0)
+        if de <= 0.1:
+            add_item("Sector-Specific (IT)", "Net Cash Reserves Status", "Pristine Net-Cash Balance Sheet", 5, 5, "🟢 Pass", "Zero-debt surplus cash buffer")
+        else:
+            add_item("Sector-Specific (IT)", "Net Cash Reserves Status", f"D/E: {de}", 2, 5, "🟡 Caution", "Unusual debt leverage for technology model")
+
+    elif archetype == "PHARMA":
+        rd_pct = safe_float(m.get("RD_Cost_Pct"))
+        if rd_pct is not None:
+            if 5.0 <= rd_pct <= 10.0:
+                add_item("Sector-Specific (Pharma)", "R&D Intensity % of Sales", f"{rd_pct}%", 10, 10, "🟢 Pass", "Robust innovation pipeline & ANDA filings runway (5% - 10%)")
+            elif rd_pct > 10.0:
+                add_item("Sector-Specific (Pharma)", "R&D Intensity % of Sales", f"{rd_pct}%", 7, 10, "🟢 Pass", "Aggressive research spend; monitor margin compression")
+            else:
+                add_item("Sector-Specific (Pharma)", "R&D Intensity % of Sales", f"{rd_pct}%", 3, 10, "🟡 Caution", "Low R&D reinvestment (< 5%); risk of pipeline depletion")
+        else:
+            add_item("Sector-Specific (Pharma)", "R&D Intensity % of Sales", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
+
+        gm_pct = safe_float(m.get("Gross_Margin_Pct"))
+        if gm_pct is not None:
+            if gm_pct >= 60.0:
+                add_item("Sector-Specific (Pharma)", "Gross Margin Profile", f"{gm_pct}%", 5, 5, "🟢 Pass", "High-value formulations & specialty product portfolio (>= 60%)")
+            elif gm_pct >= 48.0:
+                add_item("Sector-Specific (Pharma)", "Gross Margin Profile", f"{gm_pct}%", 3, 5, "🟢 Pass", "Balanced API / generics manufacturing mix")
+            else:
+                add_item("Sector-Specific (Pharma)", "Gross Margin Profile", f"{gm_pct}%", 1, 5, "🟡 Caution", "Low-margin commodity chemical/API exposure (< 48%)")
+        else:
+            add_item("Sector-Specific (Pharma)", "Gross Margin Profile", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
+
+        d_days = safe_float(m.get("Debtor_Days"))
+        if d_days is not None:
+            if d_days <= 90.0:
+                add_item("Sector-Specific (Pharma)", "Debtor / Collection Velocity", f"{d_days} Days", 5, 5, "🟢 Pass", "Efficient global distributor cash collections (<= 90 days)")
+            elif d_days <= 125.0:
+                add_item("Sector-Specific (Pharma)", "Debtor / Collection Velocity", f"{d_days} Days", 3, 5, "🟢 Pass", "Standard export credit cycle (90 - 125 days)")
+            else:
+                add_item("Sector-Specific (Pharma)", "Debtor / Collection Velocity", f"{d_days} Days", 0, 5, "🔴 Caution", "Working capital locked in receivables (> 125 days)")
+        else:
+            add_item("Sector-Specific (Pharma)", "Debtor / Collection Velocity", "Data Unavailable", 0, 0, "ℹ️ Info", "Data missing")
 
     df = pd.DataFrame(results)
     scored_rows = df[df["MaxPts"] > 0]
@@ -1007,7 +1211,15 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     composite = round((total_pts / total_max) * 100) if total_max > 0 else 0
 
     cat_breakdown = {}
-    for cat in ["Solvency & Scale", "Valuation", "Capital Efficiency", "Ownership & Governance"]:
+    categories_to_track = ["Solvency & Scale", "Valuation", "Capital Efficiency", "Ownership & Governance"]
+    if archetype == "BFSI":
+        categories_to_track.append("Sector-Specific (BFSI)")
+    elif archetype == "IT":
+        categories_to_track.append("Sector-Specific (IT)")
+    elif archetype == "PHARMA":
+        categories_to_track.append("Sector-Specific (Pharma)")
+
+    for cat in categories_to_track:
         c_df = scored_rows[scored_rows["Category"] == cat]
         if not c_df.empty and c_df["MaxPts"].sum() > 0:
             cat_breakdown[cat] = {
@@ -1015,8 +1227,6 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
                 "max": int(c_df["MaxPts"].sum()),
                 "pct": round(c_df["Pts"].sum() / c_df["MaxPts"].sum(), 2)
             }
-        else:
-            cat_breakdown[cat] = {"earned": 0, "max": 10, "pct": 0.0}
 
     return composite, df, cat_breakdown
 
@@ -1038,16 +1248,127 @@ def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_tab
             d["df_bs"].to_excel(writer, sheet_name='Balance Sheet')
         if not d["df_cf"].empty:
             d["df_cf"].to_excel(writer, sheet_name='Cash Flow')
+        if not d["df_quarters"].empty:
+            d["df_quarters"].to_excel(writer, sheet_name='Quarterly Results')
         if not d["df_shareholding"].empty:
             d["df_shareholding"].to_excel(writer, sheet_name='Shareholding')
-        if not d["df_peers"].empty:
-            d["df_peers"].to_excel(writer, sheet_name='Peers Comparison', index=False)
-        if d.get("audit_checks"):
-            pd.DataFrame(d["audit_checks"]).to_excel(writer, sheet_name='Integrity Audit', index=False)
+    return output.getvalue()
+
+# ----------------- WORD (.DOCX) TEAR-SHEET EXPORT HELPER -----------------
+def generate_word_tearsheet(symbol, d, checklist_df, final_score):
+    try:
+        from docx import Document
+        from docx.shared import Pt, Inches, RGBColor
+        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+        from docx.oxml.ns import nsdecls
+        from docx.oxml import parse_xml
+    except ImportError:
+        st.error("Please add 'python-docx' to your requirements.txt file to enable Word (.docx) downloads.")
+        return b""
+
+    def set_cell_background(cell, hex_color):
+        shading_elm = parse_xml(r'<w:shd {} w:fill="{}"/>'.format(nsdecls('w'), hex_color))
+        cell._tc.get_or_add_tcPr().append(shading_elm)
+
+    doc = Document()
+    
+    style = doc.styles['Normal']
+    style.font.name = 'Roboto'
+    style.font.size = Pt(10)
+
+    for section in doc.sections:
+        section.top_margin = Inches(0.5)
+        section.bottom_margin = Inches(0.5)
+        section.left_margin = Inches(0.5)
+        section.right_margin = Inches(0.5)
+
+    title = doc.add_heading(level=1)
+    title_run = title.add_run(f"QUANTITATIVE SCORECARD: {d.get('Company Name', symbol).upper()} ({symbol})")
+    title_run.font.name = 'Roboto'
+    title_run.font.color.rgb = RGBColor(0x0F, 0x28, 0x4F)
+    title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    
+    meta_text = f"Model: {d.get('Archetype', 'GENERAL')} Sector   |   CMP: ₹{format_inr(d.get('Current Price'))}   |   Mcap: ₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr   |   Audit Score: {final_score}/100"
+    p = doc.add_paragraph()
+    p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    meta_run = p.add_run(meta_text)
+    meta_run.font.size = Pt(10)
+    meta_run.font.bold = True
+    meta_run.font.name = 'Roboto'
+    meta_run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+        
+    doc.add_paragraph()
+
+    table = doc.add_table(rows=1, cols=5)
+    table.style = 'Table Grid'
+    table.autofit = False
+    
+    widths = [Inches(2.3), Inches(1.2), Inches(0.6), Inches(1.0), Inches(2.4)]
+    for j, col in enumerate(table.columns):
+        col.width = widths[j]
+
+    hdr_cells = table.rows[0].cells
+    headers = ['Checklist Metric', 'Current Value', 'Pts', 'Status', 'Guideline / Benchmark']
+    for i, header in enumerate(headers):
+        hdr_cells[i].text = header
+        hdr_cells[i].width = widths[i]
+        set_cell_background(hdr_cells[i], "0F284F")
+        
+        for paragraph in hdr_cells[i].paragraphs:
+            paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER if i in [2, 3] else WD_PARAGRAPH_ALIGNMENT.LEFT
+            for run in paragraph.runs:
+                run.font.name = 'Roboto'
+                run.font.bold = True
+                run.font.size = Pt(10)
+                run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            
+    for _, row in checklist_df.iterrows():
+        row_cells = table.add_row().cells
+        status_raw = str(row['Status'])
+        
+        if "Pass" in status_raw:
+            bg_hex = "F0FDF4"
+            text_rgb = RGBColor(0x13, 0x73, 0x33)
+        elif "Caution" in status_raw or "Moderate" in status_raw:
+            bg_hex = "FEFCE8"
+            text_rgb = RGBColor(0xB0, 0x60, 0x00)
+        elif "Fail" in status_raw:
+            bg_hex = "FEF2F2"
+            text_rgb = RGBColor(0xC5, 0x22, 0x1F)
+        else:
+            bg_hex = "FFFFFF"
+            text_rgb = RGBColor(0x55, 0x55, 0x55)
+        
+        row_cells[0].text = str(row['Checklist Metric'])
+        row_cells[1].text = str(row['Current Value'])
+        row_cells[2].text = str(row['Score'])
+        
+        clean_status = re.sub(r'[^\w\s/]', '', status_raw).strip()
+        row_cells[3].text = clean_status
+        row_cells[4].text = str(row['Guideline / Benchmark'])
+        
+        for j, cell in enumerate(row_cells):
+            cell.width = widths[j]
+            set_cell_background(cell, bg_hex)
+            
+            for paragraph in cell.paragraphs:
+                paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER if j in [2, 3] else WD_PARAGRAPH_ALIGNMENT.LEFT
+                
+                for run in paragraph.runs:
+                    run.font.size = Pt(10)
+                    run.font.name = 'Roboto'
+                    
+                    if j == 3:
+                        run.font.bold = True
+                        run.font.color.rgb = text_rgb
+                    elif j == 0:
+                        run.font.bold = True
+                        
+    output = io.BytesIO()
+    doc.save(output)
     return output.getvalue()
 
 # ----------------- UI APPLICATION -----------------
-# Top Banner Branding
 if os.path.exists(LOGO_FILE):
     head_col1, head_col2 = st.columns([0.08, 0.92])
     with head_col1:
@@ -1057,37 +1378,34 @@ if os.path.exists(LOGO_FILE):
 else:
     st.title("🏛️ EU QUICK FUNDA CHECK")
 
-st.caption("Institutional fundamental diagnostic terminal with audited historical multiples, DuPont decomposition, forensic detection, and real-time reconciliation.")
-
-# Sidebar Branding with Form Guard
 sidebar = st.sidebar
 if os.path.exists(LOGO_FILE):
     sidebar.image(LOGO_FILE, width=120)
 sidebar.title("EU QUICK FUNDA CHECK")
-sidebar.caption("Institutional Fundamental Terminal")
 sidebar.divider()
 
+# ----------------- SIDEBAR CONTROLS -----------------
 with sidebar.form("audit_form"):
     ticker_input = st.text_input("Enter NSE Ticker", value="TCS").upper()
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
 
 if ticker_input:
     with st.spinner(f"Auditing institutional financials for {ticker_input}..."):
-        d = scrape_full_screener(ticker_input)
+        d = scrape_full_screener(ticker_input, SCREENER_SESSION_ID)
         
         df_annual_pe, pe_stats = compute_authentic_historical_pes(
-            d["df_pl"] if d else pd.DataFrame(),
-            d["df_bs"] if d else pd.DataFrame(),
+            d.get("df_pl", pd.DataFrame()) if d else pd.DataFrame(),
+            d.get("df_bs", pd.DataFrame()) if d else pd.DataFrame(),
             safe_float(d.get("Current Price")) if d else None,
             d.get("Price_CAGR", {}) if d else {},
             d.get("Stock P/E") if d else None,
-            d.get("Face Value") if d else 10.0
+            d.get("Face Value") if d else 10.0,
+            ticker_input
         )
         
         df_forensics, red_flags_cnt, warnings_cnt = evaluate_forensic_red_flags(d) if d else (pd.DataFrame(), 0, 0)
-        df_dupont = compute_dupont_analysis(d["df_pl"], d["df_bs"]) if d else pd.DataFrame()
+        df_dupont = compute_dupont_analysis(d.get("df_pl"), d.get("df_bs")) if d else pd.DataFrame()
         live_news = fetch_live_news(ticker_input)
-        nse_delivery = fetch_nse_delivery_data(ticker_input)
         
     if not d:
         st.error(f"Unable to retrieve verified financials for '{ticker_input}'. Please check the symbol or verify on Screener.in.")
@@ -1121,6 +1439,8 @@ if ticker_input:
         extended_matrix_df = pd.DataFrame(extended_matrix)
 
         excel_bytes = generate_excel_report(ticker_input, d, checklist_df, extended_matrix_df, df_annual_pe, df_forensics, df_dupont)
+        word_bytes = generate_word_tearsheet(ticker_input, d, checklist_df, final_score)
+        
         sidebar.divider()
         sidebar.download_button(
             label=f"📥 Export {ticker_input} Audit to Excel",
@@ -1129,45 +1449,35 @@ if ticker_input:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
+        
+        sidebar.download_button(
+            label=f"📄 Download Editable Word Report",
+            data=word_bytes,
+            file_name=f"{ticker_input}_Scorecard.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
 
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("CMP (Live)", f"₹{format_inr(d.get('Current Price'))}")
         col2.metric("Market Cap", f"₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr")
-        col3.metric("Stock P/E (TTM)", d.get('Stock P/E', 'N/A'))
-        col4.metric("Forensic Red Flags", f"{red_flags_cnt} High Risk", delta=f"{warnings_cnt} Cautions", delta_color="inverse")
-        col5.metric("Checklist Score", f"{final_score} / 100", delta="Pass" if final_score >= 70 else "Review")
+        col3.metric("Stock P/E", d.get('Stock P/E', 'N/A'))
+        col4.metric("5Y Median P/E", pe_stats.get('5Y_Median', 'N/A') if pe_stats else 'N/A')
+        col5.metric("Red Flags", f"{red_flags_cnt} High Risk", delta=f"{warnings_cnt} Cautions", delta_color="inverse")
+        col6.metric("Audit Score", f"{final_score} / 100", delta=d.get("Archetype"))
         
-        st.write(f"### {d.get('Company Name')} (`{d.get('Symbol')}`)")
+        st.write(f"### {d.get('Company Name')} (`{d.get('Symbol')}`) — *{d.get('Archetype')} Diagnostic Model*")
         if d.get("Sector_Desc"):
             st.info(f"Sector / Peer Info: {d.get('Sector_Desc')}")
 
         if red_flags_cnt >= 2:
-            st.error(f"**CRITICAL FORENSIC ALERT:** {red_flags_cnt} High-Risk accounting or cash-flow red flags detected. Inspect individual flags below.")
+            st.error(f"**CRITICAL FORENSIC ALERT:** {red_flags_cnt} High-Risk accounting or cash-flow red flags detected.")
         elif final_score >= 75:
             st.success(f"**FINAL VERDICT: STRONG PASS ({final_score}/100)** — Sound fundamentals across balance sheet, cash conversion, and capital returns.")
         elif final_score >= 55:
             st.warning(f"**FINAL VERDICT: CONDITIONAL / WATCHLIST ({final_score}/100)** — Moderate profile. Review individual caution flags before entry.")
         else:
             st.error(f"**FINAL VERDICT: AVOID / HIGH CAUTION ({final_score}/100)** — Critical structural, leverage, or liquidity red flags detected.")
-
-        st.markdown("#### 🎯 Score Breakdown by Category")
-        pb1, pb2, pb3, pb4 = st.columns(4)
-        with pb1:
-            c_sol = cat_scores["Solvency & Scale"]
-            st.write(f"**Solvency & Scale**: {c_sol['earned']}/{c_sol['max']} pts")
-            st.progress(c_sol["pct"])
-        with pb2:
-            c_val = cat_scores["Valuation"]
-            st.write(f"**Valuation**: {c_val['earned']}/{c_val['max']} pts")
-            st.progress(c_val["pct"])
-        with pb3:
-            c_cap = cat_scores["Capital Efficiency"]
-            st.write(f"**Capital Returns**: {c_cap['earned']}/{c_cap['max']} pts")
-            st.progress(c_cap["pct"])
-        with pb4:
-            c_gov = cat_scores["Ownership & Governance"]
-            st.write(f"**Governance**: {c_gov['earned']}/{c_gov['max']} pts")
-            st.progress(c_gov["pct"])
 
         st.divider()
 
@@ -1185,7 +1495,7 @@ if ticker_input:
 
         # TAB 1: SCORECARD
         with tab_scorecard:
-            st.markdown("#### Itemized Checklist Evaluation (Mapped to Institutional Guidelines)")
+            st.markdown(f"#### Itemized Checklist Evaluation ({d.get('Archetype')} Sector Model)")
             def style_status(val):
                 if "Pass" in str(val):
                     return 'background-color: #d4edda; color: #155724; font-weight: bold;'
@@ -1195,15 +1505,13 @@ if ticker_input:
                     return 'background-color: #f8d7da; color: #721c24; font-weight: bold;'
                 return 'color: #555555; font-style: italic;'
 
-            display_table = checklist_df[["Category", "Checklist Metric", "Current Value", "Score", "Status", "Guideline / Benchmark"]]
+            display_table = checklist_df[["Checklist Metric", "Current Value", "Score", "Status", "Guideline / Benchmark"]].astype(str)
             styled = display_table.style.map(style_status, subset=['Status'])
             st.dataframe(styled, use_container_width=True, hide_index=True)
 
-        # TAB 2: CLEAN COMPOUNDED GROWTH
+        # TAB 2: COMPOUNDED GROWTH
         with tab_cagr:
             st.markdown("### 📊 Comprehensive 8-Metric Compounded Matrix")
-            st.caption("Native and computed compounded growth rates across financial timeframes.")
-            
             st.dataframe(extended_matrix_df, hide_index=True, use_container_width=True)
 
             st.divider()
@@ -1222,12 +1530,11 @@ if ticker_input:
                 st.markdown("##### 🏛️ Net Worth / Equity CAGR")
                 st.dataframe(pd.DataFrame(list(d["NetWorth_CAGR"].items()), columns=["Period", "Net Worth"]), hide_index=True, use_container_width=True)
 
-        # TAB 3: FINANCIAL STATEMENTS (WITH INDIAN NUMBER NOTATION FORMATTING)
+        # TAB 3: FINANCIAL STATEMENTS
         with tab_financials:
             st.markdown("### 📑 Primary Financial Statements (₹ Cr)")
-            st.caption("All figures formatted with Indian numbering notation (1,00,000).")
-            
-            if not d["df_pl"].empty:
+
+            if not d.get("df_pl", pd.DataFrame()).empty:
                 st.markdown("#### 1. Profit & Loss Statement (₹ Cr)")
                 st.dataframe(format_financial_df(d["df_pl"]), use_container_width=True)
             else:
@@ -1235,7 +1542,7 @@ if ticker_input:
 
             st.divider()
 
-            if not d["df_bs"].empty:
+            if not d.get("df_bs", pd.DataFrame()).empty:
                 st.markdown("#### 2. Balance Sheet (₹ Cr)")
                 st.dataframe(format_financial_df(d["df_bs"]), use_container_width=True)
             else:
@@ -1243,16 +1550,15 @@ if ticker_input:
 
             st.divider()
 
-            if not d["df_cf"].empty:
+            if not d.get("df_cf", pd.DataFrame()).empty:
                 st.markdown("#### 3. Cash Flow Statement (₹ Cr)")
                 st.dataframe(format_financial_df(d["df_cf"]), use_container_width=True)
             else:
                 st.info("Cash Flow statement unavailable.")
 
-        # TAB 4: DUPONT 3-STAGE WITH DEFENSIVE PROTECTION
+        # TAB 4: DUPONT 3-STAGE
         with tab_dupont:
             st.markdown("### 🔬 DuPont 3-Stage Decomposition")
-            st.caption("Deconstructs Return on Equity into Profit Margin (Operating Efficiency), Asset Turnover (Capital Efficiency), and Equity Multiplier (Financial Leverage).")
 
             if not df_dupont.empty:
                 dp_latest = df_dupont.iloc[-1]
@@ -1265,23 +1571,22 @@ if ticker_input:
                 st.markdown("#### 📋 10-Year DuPont Decomposition Table")
                 st.dataframe(df_dupont, hide_index=True, use_container_width=True)
             else:
-                st.info("DuPont decomposition requires complete multi-year P&L and Balance Sheet records.")
+                st.info("DuPont decomposition requires complete multi-year records.")
 
         # TAB 5: HISTORICAL P/E BANDS
         with tab_pe_bands:
             st.markdown("### 📊 Historical P/E Valuation Analysis & Multiple Trajectory")
-            st.caption("Chronological comparison of year-end P/E multiples against 3Y, 5Y, and 10Y historical medians.")
 
             if pe_stats:
                 b1, b2, b3, b4 = st.columns(4)
-                b1.metric(label="Current P/E", value=f"{pe_stats.get('Current_PE', d.get('Stock P/E', 'N/A'))}")
+                b1.metric(label="Live Market P/E (TTM)", value=f"{d.get('Stock P/E', pe_stats.get('Current_PE', 'N/A'))}")
                 b2.metric(label="3Y Median P/E", value=f"{pe_stats.get('3Y_Median', 'N/A')}")
                 b3.metric(label="5Y Median P/E", value=f"{pe_stats.get('5Y_Median', 'N/A')}")
                 b4.metric(label="10Y Median P/E", value=f"{pe_stats.get('10Y_Median', 'N/A')}")
 
                 st.info(f"**Valuation Status:** {pe_stats.get('Zone', 'Valuation Benchmarking Active')}")
 
-            st.markdown("#### 📅 Historical Annual EPS, Net Profit & Year-End P/E Progression")
+            st.markdown("#### 📅 Historical Annual EPS, Net Profit & Year-End Closing P/E")
             if not df_annual_pe.empty:
                 st.dataframe(df_annual_pe, hide_index=True, use_container_width=True)
 
@@ -1300,7 +1605,6 @@ if ticker_input:
         # TAB 6: FORENSIC RED FLAGS
         with tab_forensics:
             st.markdown("### 🚩 Forensic Accounting & Earnings Quality Screen")
-            st.caption("Automates institutional forensic checks (accrual anomalies, earnings decoupling, cumulative cash realization, and promoter leverage).")
 
             fc1, fc2, fc3 = st.columns(3)
             fc1.metric("Critical Red Flags", f"{red_flags_cnt}", delta="Clean" if red_flags_cnt == 0 else "High Risk", delta_color="inverse")
@@ -1327,16 +1631,15 @@ if ticker_input:
         # TAB 7: PEERS BENCHMARKING
         with tab_peers:
             st.markdown("#### Sector Competitor Benchmarking")
-            if not d["df_peers"].empty:
+            if not d.get("df_peers", pd.DataFrame()).empty:
                 st.dataframe(d["df_peers"], use_container_width=True, hide_index=True)
             else:
-                st.info("Live peers table could not be parsed directly. Check competitor rankings below:")
+                st.info("Live peers table could not be parsed directly.")
                 st.link_button(f"🔍 View {ticker_input} Peers on Screener", f"https://www.screener.in/company/{ticker_input}/#peers")
 
         # TAB 8: DATA INTEGRITY AUDIT
         with tab_audit:
             st.markdown("### 🛡️ Automated Data Reconciliation & Integrity Audit")
-            st.caption("Verifies mathematical coherence across statements to ensure numbers are extracted and calculated accurately.")
 
             if d.get("audit_checks"):
                 df_audit = pd.DataFrame(d["audit_checks"])
@@ -1344,14 +1647,13 @@ if ticker_input:
 
             st.divider()
             st.markdown("#### 🔍 Direct Cross-Verification Links")
-            st.write("Verify any individual cell directly on primary sources:")
             al1, al2 = st.columns(2)
             with al1:
                 st.link_button(f"🔗 Open Primary Screener Financial Page for {ticker_input}", f"https://www.screener.in/company/{ticker_input}/", use_container_width=True)
             with al2:
                 st.link_button(f"🔗 Open BSE India Corporate Filings for {ticker_input}", "https://www.bseindia.com/corporates/ann.html", use_container_width=True)
 
-        # TAB 9: EVENTS, NEWS & FILINGS
+        # TAB 9: EVENTS, NEWS & FILINGS (CONCALL PARSER REMOVED)
         with tab_events:
             ev_col1, ev_col2 = st.columns(2)
             with ev_col1:
@@ -1364,27 +1666,21 @@ if ticker_input:
 
                 st.divider()
                 st.markdown("### 🚚 Delivery & Volume Absorption (NSE)")
-                if nse_delivery and nse_delivery.get('delivery_pct') is not None:
-                    d_pct = nse_delivery['delivery_pct']
-                    st.metric("Latest NSE Delivery %", f"{d_pct:.1f}%", delta="High Absorption" if d_pct >= 50 else "Normal")
-                    st.write(f"• Delivery Quantity: `{format_inr(nse_delivery.get('delivery_qty'))}` shares")
-                    st.write(f"• Total Traded Volume: `{format_inr(nse_delivery.get('traded_qty'))}` shares")
-                else:
-                    st.caption("NSE direct delivery snapshot requires active market session or browser verification.")
-                    st.link_button("📊 Check Live NSE Delivery on Official Page", f"https://www.nseindia.com/get-quotes/equity?symbol={ticker_input}")
+                st.link_button("📊 Check Live NSE Delivery on Official Page", f"https://www.nseindia.com/get-quotes/equity?symbol={ticker_input}")
 
             with ev_col2:
-                st.markdown("### 🎙️ Earnings Calls & Concall Transcripts")
+                st.markdown("### 🎙️ Earnings Calls & Corporate Filings")
+                
+                available_docs = []
                 if d.get("live_concalls"):
                     for c in d["live_concalls"]:
-                        st.markdown(f"• **{c['Date']}**: [{c['Title']}]({c['Link']})")
-                else:
-                    st.info("No concall documents found for this company.")
-
-                st.divider()
-                st.markdown("### 🏛️ Official Regulatory Filings & Disclosures")
+                        available_docs.append({"Label": f"Concall: {c['Title']} ({c['Date']})", "Link": c['Link']})
                 if d.get("live_announcements"):
-                    for ann in d["live_announcements"]:
-                        st.markdown(f"• **{ann['Date']}**: [{ann['Title']}]({ann['Link']})")
+                    for a in d["live_announcements"][:4]:
+                        available_docs.append({"Label": f"Filing: {a['Title']} ({a['Date']})", "Link": a['Link']})
+
+                if available_docs:
+                    for doc in available_docs[:6]:
+                        st.markdown(f"• [{doc['Label']}]({doc['Link']})")
                 else:
-                    st.info("No recent announcements found.")
+                    st.info("No recent filings indexed on Screener yet.")
