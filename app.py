@@ -429,7 +429,9 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
         session.cookies.set("sessionid", clean_cookie, domain=".screener.in", path="/")
         session.cookies.set("sessionid", clean_cookie, domain="www.screener.in", path="/")
 
-    soup = None
+    best_soup = None
+    max_cols = -1
+    
     urls_to_try = [
         f"https://www.screener.in/company/{symbol}/consolidated/",
         f"https://www.screener.in/company/{symbol}/"
@@ -440,12 +442,30 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
             r = session.get(u, headers=HEADERS, cookies=cookies_dict, timeout=6.0, allow_redirects=True)
             if r.status_code == 200 and len(r.text) > 1000:
                 temp_soup = BeautifulSoup(r.text, 'html.parser')
-                if temp_soup.find('section', {'id': re.compile(r'profit-loss|income|quarters|quarterly|balance-sheet', re.I)}):
-                    soup = temp_soup
+                pl_sec = temp_soup.find('section', {'id': re.compile(r'profit-loss|income', re.I)})
+                
+                cols_count = 0
+                if pl_sec:
+                    pl_table = pl_sec.find('table')
+                    cols_count = len(pl_table.find_all('th')) if pl_table else 0
+                
+                # If no P&L, but has a balance sheet, assign a baseline weight
+                if cols_count == 0 and temp_soup.find('section', {'id': re.compile(r'balance-sheet', re.I)}):
+                    cols_count = 1 
+                    
+                # Keep the page that has the longest historical data
+                if cols_count > max_cols:
+                    max_cols = cols_count
+                    best_soup = temp_soup
+                    
+                # If we find a page with robust history (>= 6 columns), lock it in and stop searching!
+                if max_cols >= 6:
                     break
         except Exception:
             continue
 
+    soup = best_soup
+    
     if not soup:
         return None
 
