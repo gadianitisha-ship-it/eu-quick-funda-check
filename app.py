@@ -543,8 +543,13 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
                     raw_name = name_el.get_text(separator=" ", strip=True)
                     clean_name = re.sub(r'\s+', ' ', raw_name)
                     val_clean = val_el.get_text(separator=" ", strip=True).replace(',', '').replace('₹', '').strip()
-                    parsed = safe_float(val_clean)
-                    final_val = parsed if parsed is not None else val_clean
+                    
+                    # Prevent safe_float from destroying dual-number strings like "High / Low"
+                    if "/" in val_clean:
+                        final_val = val_clean
+                    else:
+                        parsed = safe_float(val_clean)
+                        final_val = parsed if parsed is not None else val_clean
                     
                     data[clean_name] = final_val
                     norm_key = re.sub(r'[^a-zA-Z0-9]', '', clean_name).lower()
