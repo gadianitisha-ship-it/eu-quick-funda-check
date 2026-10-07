@@ -96,17 +96,6 @@ def compute_series_cagr(series, years):
     except Exception:
         return "N/A", start_val, end_val
 
-# ----------------- SECTOR ARCHETYPE RESOLVER -----------------
-def resolve_sector_archetype(sector_desc: str, company_name: str) -> str:
-    text = f"{sector_desc} {company_name}".lower()
-    if any(k in text for k in ["bank", "nbfc", "housing finance", "financial services", "insurance", "microfinance", "small finance", "fintech"]):
-        return "BFSI"
-    elif any(k in text for k in ["it services", "software", "computers - software", "information technology", "data processing", "technology"]):
-        return "IT"
-    elif any(k in text for k in ["pharma", "pharmaceutical", "drugs", "healthcare", "biotechnology", "hospital"]):
-        return "PHARMA"
-    return "GENERAL"
-
 # ----------------- REAL HISTORICAL PRICE & P/E ENGINE -----------------
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_real_historical_prices(symbol: str):
@@ -285,7 +274,6 @@ def compute_dupont_analysis(df_pl, df_bs):
 # ----------------- FORENSIC RED FLAG DETECTOR -----------------
 def evaluate_forensic_red_flags(d: dict):
     flags = []
-    archetype = d.get("Archetype", "GENERAL")
 
     def add_flag(check_name, status, severity, current_reading, interpretation):
         flags.append({
@@ -395,24 +383,13 @@ def evaluate_forensic_red_flags(d: dict):
                      f"Negative CFO in {neg_cfo_count} of the last 4 fiscal years",
                      "Structural cash drain. Core operations are burning rather than generating cash.")
         elif neg_cfo_count == 1:
-            add_flag("Negative Operating Cash Flow Recurrence", "⚠️️ WARNING", "Medium",
+            add_flag("Negative Operating Cash Flow Recurrence", "⚠ WARNING", "Medium",
                      f"Negative CFO in 1 of the last 4 fiscal years",
                      "Occasional operational cash deficit detected.")
         else:
             add_flag("Negative Operating Cash Flow Recurrence", "✅ CLEAR", "Low",
                      "Positive CFO across all recent 4 fiscal years",
                      "Consistent operational cash generation.")
-
-    if archetype == "BFSI":
-        gnpa = safe_float(d.get("Gross_NPA_Val"))
-        gnpa_period = d.get("Gross_NPA_Period", "Latest")
-        if gnpa is not None:
-            if gnpa > 4.0:
-                add_flag("Gross NPA Overhang", "🚩 RED FLAG", "High", f"Gross NPA: {gnpa}% [{gnpa_period}]", "Elevated non-performing assets exceeding safe institutional threshold (3.0%).")
-            elif gnpa > 2.0:
-                add_flag("Gross NPA Overhang", "⚠️ WARNING", "Medium", f"Gross NPA: {gnpa}% [{gnpa_period}]", "Moderate asset quality impairment.")
-            else:
-                add_flag("Gross NPA Overhang", "✅ CLEAR", "Low", f"Gross NPA: {gnpa}% [{gnpa_period}]", "Pristine loan book asset quality.")
 
     df_flags = pd.DataFrame(flags)
     red_count = sum(1 for f in flags if "RED FLAG" in f["Status"])
@@ -440,7 +417,7 @@ def fetch_live_news(ticker: str):
 
 # ----------------- SCRAPER ENGINE -----------------
 @st.cache_data(ttl=600, show_spinner=False)
-def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 20):
+def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID, _cache_ver: int = 21):
     symbol = symbol.strip().upper()
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -477,7 +454,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
     title_tag = soup.find('h1')
     data["Company Name"] = title_tag.text.strip() if title_tag else symbol
     
-    # Clean Sector Description
     peers_section = soup.find('section', {'id': 'peers'})
     sector_txt = ""
     if peers_section:
@@ -489,13 +465,11 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
             else:
                 sector_txt = re.sub(r'\s+', ' ', sub_text.text.strip())
     data["Sector_Desc"] = sector_txt
-    data["Archetype"] = resolve_sector_archetype(sector_txt, data["Company Name"])
 
     company_id_match = re.search(r'data-company-id="(\d+)"', str(soup)) or re.search(r'/api/company/(\d+)/', str(soup))
     company_id = company_id_match.group(1) if company_id_match else None
     data["Company_ID"] = company_id
 
-    # Peers Table Extraction
     data["df_peers"] = pd.DataFrame()
     peer_html = ""
     if company_id:
@@ -532,7 +506,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
         except Exception:
             pass
 
-    # Documents & Concalls
     documents_list = []
     concall_list = []
     announcements_sec = soup.find('section', {'id': 'documents'})
@@ -630,24 +603,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
     data["df_ratios"] = extract_full_table(["ratios"])
     data["df_shareholding"] = extract_full_table(["shareholding"])
 
-    def get_row_series_and_col(df, row_name, exclude_kws=None):
-        if df is None or df.empty:
-            return None, None
-        exclude_kws = exclude_kws or []
-        final_val, final_col = None, None
-        for idx in df.index:
-            idx_str = str(idx).lower().strip()
-            if row_name.lower() in idx_str:
-                if any(excl.lower() in idx_str for excl in exclude_kws):
-                    continue
-                for col in reversed(df.columns):
-                    val = safe_float(df.loc[idx, col])
-                    if val is not None:
-                        final_val = val
-                        final_col = col
-                        break
-        return final_val, final_col
-
     def get_row_series(df, row_name, exclude_kws=None):
         if df is None or df.empty:
             return []
@@ -666,42 +621,6 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
                 if vals:
                     final_vals = vals
         return final_vals
-
-    # BFSI Metrics (Asset Quality & Multiples)
-    gnpa_val, gnpa_period = get_row_series_and_col(data["df_quarters"], "Gross NPA")
-    if gnpa_val is None:
-        gnpa_val, gnpa_period = get_row_series_and_col(data["df_pl"], "Gross NPA")
-    data["Gross_NPA_Val"] = gnpa_val
-    data["Gross_NPA_Period"] = gnpa_period if gnpa_period else "Latest"
-
-    nnpa_val, nnpa_period = get_row_series_and_col(data["df_quarters"], "Net NPA")
-    if nnpa_val is None:
-        nnpa_val, nnpa_period = get_row_series_and_col(data["df_pl"], "Net NPA")
-    data["Net_NPA_Val"] = nnpa_val
-    data["Net_NPA_Period"] = nnpa_period if nnpa_period else "Latest"
-
-    # Pharma Metrics
-    sales_ser = get_row_series(data["df_pl"], "Sales") or get_row_series(data["df_pl"], "Revenue") or get_row_series(data["df_pl"], "Interest Earned")
-    mat_ser = get_row_series(data["df_pl"], "Material Cost") or get_row_series(data["df_pl"], "Raw Material")
-    if sales_ser and mat_ser and sales_ser[-1] > 0:
-        data["Gross_Margin_Pct"] = round(((sales_ser[-1] - mat_ser[-1]) / sales_ser[-1]) * 100, 1)
-    else:
-        opm_val = safe_float(data.get("OPM"))
-        data["Gross_Margin_Pct"] = round(opm_val + 35.0, 1) if opm_val else 62.0
-
-    rd_ser = get_row_series(data["df_pl"], "Research") or get_row_series(data["df_pl"], "R&D")
-    if sales_ser and rd_ser and sales_ser[-1] > 0:
-        data["RD_Cost_Pct"] = round((rd_ser[-1] / sales_ser[-1]) * 100, 1)
-    else:
-        data["RD_Cost_Pct"] = safe_float(data.get("R&D % of Sales"), 6.8)
-
-    deb_days = None
-    if not data["df_ratios"].empty:
-        for idx in data["df_ratios"].index:
-            if "debtor days" in str(idx).lower():
-                deb_days = safe_float(data["df_ratios"].loc[idx].iloc[-1])
-                break
-    data["Debtor_Days"] = deb_days if deb_days is not None else safe_float(data.get("Debtor days"), 85.0)
 
     def extract_compound_table(keyword):
         tables = soup.find_all('table', class_='ranges-table')
@@ -881,10 +800,9 @@ def scrape_full_screener(symbol: str, session_cookie: str = SCREENER_SESSION_ID,
 
     return data
 
-# ----------------- SCORING ENGINE (CLEANED & SMART DELETION) -----------------
+# ----------------- UNIFIED SCORING ENGINE (NO SECTOR MODELS) -----------------
 def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     results = []
-    archetype = m.get("Archetype", "GENERAL")
 
     def add_item(category, name, current_val, points, max_pts, status, guideline):
         results.append({
@@ -900,7 +818,7 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
 
     # 1. OVERVIEW
     add_item("Overview", "NSE Symbol", m.get("Symbol"), 0, 0, "ℹ️ Info", "Stock Ticker")
-    add_item("Overview", "Sector & Index", f"{m.get('Sector_Desc', 'General')} [{archetype}]", 0, 0, "ℹ️ Info", "Sectoral trend / Index membership")
+    add_item("Overview", "Sector & Index", f"{m.get('Sector_Desc', 'General')}", 0, 0, "ℹ️ Info", "Sectoral trend / Index membership")
     add_item("Overview", "CMP (Live)", f"₹{format_inr(m.get('Current Price'))}", 0, 0, "ℹ️ Info", "Live Market Price")
     add_item("Overview", "Book Value (Audited)", f"₹{format_inr(m.get('Book Value'))}", 0, 0, "ℹ️ Info", "Reported Book Value")
     add_item("Overview", "Face Value", f"₹{m.get('Face Value', 'N/A')}", 0, 0, "ℹ️ Info", "Nominal Share Par Value")
@@ -1110,7 +1028,24 @@ def evaluate_exact_checklist(m: dict, pe_stats: dict = None):
     else:
         add_item("Ownership & Governance", "Promoter Holding (1-Yr Trend)", f"{prom_val}% [{prom_hist}]", 3, 5, "🟡 Caution", "Promoter holding declined over the trailing year")
 
-    
+    df = pd.DataFrame(results)
+    scored_rows = df[df["MaxPts"] > 0]
+    total_pts = scored_rows["Pts"].sum()
+    total_max = scored_rows["MaxPts"].sum()
+    composite = round((total_pts / total_max) * 100) if total_max > 0 else 0
+
+    cat_breakdown = {}
+    for cat in ["Solvency & Scale", "Valuation", "Capital Efficiency", "Ownership & Governance"]:
+        c_df = scored_rows[scored_rows["Category"] == cat]
+        if not c_df.empty and c_df["MaxPts"].sum() > 0:
+            cat_breakdown[cat] = {
+                "earned": int(c_df["Pts"].sum()),
+                "max": int(c_df["MaxPts"].sum()),
+                "pct": round(c_df["Pts"].sum() / c_df["MaxPts"].sum(), 2)
+            }
+
+    return composite, df, cat_breakdown
+
 # ----------------- EXCEL EXPORT HELPER -----------------
 def generate_excel_report(symbol, d, checklist_df, extended_matrix_df, df_pe_table=None, df_forensics=None, df_dupont=None):
     output = io.BytesIO()
@@ -1169,7 +1104,7 @@ def generate_word_tearsheet(symbol, d, checklist_df, final_score):
     title_run.font.color.rgb = RGBColor(0x0F, 0x28, 0x4F)
     title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     
-    meta_text = f"Model: {d.get('Archetype', 'GENERAL')} Sector   |   CMP: ₹{format_inr(d.get('Current Price'))}   |   Mcap: ₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr   |   Audit Score: {final_score}/100"
+    meta_text = f"CMP: ₹{format_inr(d.get('Current Price'))}   |   Mcap: ₹{format_inr(safe_float(d.get('Market Cap'), 0))} Cr   |   Audit Score: {final_score}/100"
     p = doc.add_paragraph()
     p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     meta_run = p.add_run(meta_text)
@@ -1267,7 +1202,7 @@ sidebar.divider()
 
 # ----------------- SIDEBAR CONTROLS -----------------
 with sidebar.form("audit_form"):
-    ticker_input = st.text_input("Enter NSE Ticker", value="TCS").upper()
+    ticker_input = st.text_input("Enter NSE Ticker", value="LUPIN").upper()
     search_btn = st.form_submit_button("Run Comprehensive Audit", use_container_width=True)
 
 if ticker_input:
@@ -1345,9 +1280,9 @@ if ticker_input:
         col3.metric("Stock P/E", d.get('Stock P/E', 'N/A'))
         col4.metric("5Y Median P/E", pe_stats.get('5Y_Median', 'N/A') if pe_stats else 'N/A')
         col5.metric("Red Flags", f"{red_flags_cnt} High Risk", delta=f"{warnings_cnt} Cautions", delta_color="inverse")
-        col6.metric("Audit Score", f"{final_score} / 100", delta=d.get("Archetype"))
+        col6.metric("Audit Score", f"{final_score} / 100")
         
-        st.write(f"### {d.get('Company Name')} (`{d.get('Symbol')}`) — *{d.get('Archetype')} Diagnostic Model*")
+        st.write(f"### {d.get('Company Name')} (`{d.get('Symbol')}`) — *Universal Core Audit Model*")
         if d.get("Sector_Desc"):
             st.info(f"Sector / Peer Info: {d.get('Sector_Desc')}")
 
@@ -1376,7 +1311,7 @@ if ticker_input:
 
         # TAB 1: SCORECARD
         with tab_scorecard:
-            st.markdown(f"#### Itemized Checklist Evaluation ({d.get('Archetype')} Sector Model)")
+            st.markdown("#### Itemized Core Checklist Evaluation")
             def style_status(val):
                 if "Pass" in str(val):
                     return 'background-color: #d4edda; color: #155724; font-weight: bold;'
@@ -1534,7 +1469,7 @@ if ticker_input:
             with al2:
                 st.link_button(f"🔗 Open BSE India Corporate Filings for {ticker_input}", "https://www.bseindia.com/corporates/ann.html", use_container_width=True)
 
-        # TAB 9: EVENTS, NEWS & FILINGS (CONCALL PARSER REMOVED)
+        # TAB 9: EVENTS, NEWS & FILINGS
         with tab_events:
             ev_col1, ev_col2 = st.columns(2)
             with ev_col1:
